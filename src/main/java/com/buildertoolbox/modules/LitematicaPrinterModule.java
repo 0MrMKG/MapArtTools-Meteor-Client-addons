@@ -6,10 +6,14 @@ import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BlockListSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -17,24 +21,43 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockIterator;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.DoorBlock;
+import net.minecraft.block.FenceGateBlock;
+import net.minecraft.block.StairsBlock;
+import net.minecraft.block.TrapdoorBlock;
+import net.minecraft.block.enums.BlockHalf;
+import net.minecraft.block.enums.SlabType;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.state.property.Property;
+import net.minecraft.state.property.Properties;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Direction.Axis;
+import net.minecraft.util.math.Vec3d;
 
 /** Places missing blocks from the active Litematica projection. */
 public final class LitematicaPrinterModule extends Module {
     private static final int ROTATION_PRIORITY = 50;
+    private static final int PLACEMENT_CONFIRMATION_TICKS = 4;
+    private static final int FAILED_PLACEMENT_RETRY_TICKS = 12;
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgPlacement = settings.createGroup("Placement");
     private final SettingGroup sgFilter = settings.createGroup("Filter");
+    private final SettingGroup sgRendering = settings.createGroup("Rendering");
 
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
         .name("range")
@@ -66,7 +89,7 @@ public final class LitematicaPrinterModule extends Module {
     private final Setting<SortMode> sortMode = sgGeneral.add(new EnumSetting.Builder<SortMode>()
         .name("sort-mode")
         .description("Order in which eligible projection blocks are printed.")
-        .defaultValue(SortMode.NEAREST)
+        .defaultValue(SortMode.BOTTOM_UP)
         .build()
     );
 
@@ -98,6 +121,13 @@ public final class LitematicaPrinterModule extends Module {
         .build()
     );
 
+    private final Setting<Boolean> stateAwarePlacement = sgPlacement.add(new BoolSetting.Builder()
+        .name("state-aware-placement")
+        .description("Use the projection's orientation, axis, and top or bottom placement state when placing blocks.")
+        .defaultValue(true)
+        .build()
+    );
+
     private final Setting<FilterMode> filterMode = sgFilter.add(new EnumSetting.Builder<FilterMode>()
         .name("filter-mode")
         .description("Optionally limit printing to a list of projection blocks.")
@@ -112,8 +142,43 @@ public final class LitematicaPrinterModule extends Module {
         .build()
     );
 
+    private final Setting<Boolean> renderStatus = sgRendering.add(new BoolSetting.Builder()
+        .name("render-status")
+        .description("Render nearby non-air projection blocks by their placement status.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<SettingColor> readyColor = sgRendering.add(new ColorSetting.Builder()
+        .name("not-placed-color")
+        .description("Blue: the projection block is ready to be placed.")
+        .defaultValue(new SettingColor(55, 135, 255, 80))
+        .visible(renderStatus::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> placedColor = sgRendering.add(new ColorSetting.Builder()
+        .name("placed-color")
+        .description("Green: the world matches the relevant placement state of the projection block.")
+        .defaultValue(new SettingColor(70, 210, 95, 80))
+        .visible(renderStatus::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> blockedColor = sgRendering.add(new ColorSetting.Builder()
+        .name("blocked-color")
+        .description("Red: the block cannot currently be placed or has an incorrect placement state.")
+        .defaultValue(new SettingColor(235, 65, 65, 95))
+        .visible(renderStatus::get)
+        .build()
+    );
+
     private final List<BlockPos> candidates = new ArrayList<>();
+    private final Map<BlockPos, ProjectionStatus> renderStatuses = new HashMap<>();
+    private final Map<BlockPos, Long> pendingPlacements = new HashMap<>();
+    private final Map<BlockPos, Long> failedUntil = new HashMap<>();
     private int delayTicks;
+    private long tick;
     private boolean missingSchematicReported;
 
     public LitematicaPrinterModule() {
@@ -123,21 +188,32 @@ public final class LitematicaPrinterModule extends Module {
     @Override
     public void onActivate() {
         candidates.clear();
+        renderStatuses.clear();
+        pendingPlacements.clear();
+        failedUntil.clear();
         delayTicks = 0;
+        tick = 0;
         missingSchematicReported = false;
     }
 
     @Override
     public void onDeactivate() {
         candidates.clear();
+        renderStatuses.clear();
+        pendingPlacements.clear();
+        failedUntil.clear();
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
+        tick++;
 
         WorldSchematic schematicWorld = SchematicWorldHandler.getSchematicWorld();
         if (schematicWorld == null) {
+            renderStatuses.clear();
+            pendingPlacements.clear();
+            failedUntil.clear();
             if (!missingSchematicReported) {
                 warning("Load a Litematica schematic before enabling the printer.");
                 missingSchematicReported = true;
@@ -146,13 +222,17 @@ public final class LitematicaPrinterModule extends Module {
         }
 
         missingSchematicReported = false;
+        settlePendingPlacements(schematicWorld);
         if (delayTicks++ < delay.get()) return;
         delayTicks = 0;
 
         candidates.clear();
+        renderStatuses.clear();
+        Map<Block, Boolean> materialAvailability = new HashMap<>();
         int scanRange = range.get() + 1;
         BlockIterator.register(scanRange, scanRange, (pos, currentState) -> {
             BlockState requiredState = schematicWorld.getBlockState(pos);
+            updateRenderStatus(pos, currentState, requiredState, materialAvailability);
             if (isMissingProjectionBlock(pos, currentState, requiredState)) candidates.add(pos.toImmutable());
         });
 
@@ -160,15 +240,18 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private boolean isMissingProjectionBlock(BlockPos pos, BlockState currentState, BlockState requiredState) {
-        return currentState.isReplaceable()
+        return canReplaceWithRequiredState(currentState, requiredState)
             && !requiredState.isAir()
             && requiredState.getFluidState().isEmpty()
-            && currentState.getBlock() != requiredState.getBlock()
+            && !matchesProjection(currentState, requiredState)
             && passesFilter(requiredState.getBlock())
             && mc.player.getBlockPos().isWithinDistance(pos, range.get())
             && !mc.player.getBoundingBox().intersects(new Box(pos))
             && DataManager.getRenderLayerRange().isPositionWithinRange(pos)
-            && requiredState.canPlaceAt(mc.world, pos);
+            && requiredState.canPlaceAt(mc.world, pos)
+            && hasRequiredItem(requiredState)
+            && !pendingPlacements.containsKey(pos)
+            && failedUntil.getOrDefault(pos, 0L) <= tick;
     }
 
     private void placeCandidates(WorldSchematic schematicWorld) {
@@ -184,27 +267,249 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private boolean placeBlock(BlockPos pos, BlockState requiredState) {
-        if (!mc.world.getBlockState(pos).isReplaceable()) return false;
+        BlockState currentState = mc.world.getBlockState(pos);
+        if (!canReplaceWithRequiredState(currentState, requiredState)) {
+            markPlacementFailed(pos);
+            return false;
+        }
 
-        Item requiredItem = requiredState.getBlock() == Blocks.GRASS_BLOCK && dirtAsGrass.get()
-            ? Items.DIRT
-            : requiredState.getBlock().asItem();
+        Item requiredItem = getRequiredItem(requiredState);
         FindItemResult item = InvUtils.findInHotbar(requiredItem);
         if (!item.found() && moveFromInventory.get()) item = moveItemToHotbar(requiredItem);
-        if (!item.found() || !item.isHotbar()) return false;
+        if (!item.found() || !item.isHotbar()) {
+            markPlacementFailed(pos);
+            return false;
+        }
 
-        return BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
+        boolean placed = stateAwarePlacement.get()
+            ? placeStateAware(pos, currentState, requiredState, item)
+            : BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
+
+        if (placed) pendingPlacements.put(pos.toImmutable(), tick);
+        else markPlacementFailed(pos);
+        return placed;
     }
 
     private FindItemResult moveItemToHotbar(Item requiredItem) {
         FindItemResult inventoryItem = InvUtils.find(requiredItem);
         FindItemResult emptyHotbarSlot = InvUtils.findEmpty();
-        if (!inventoryItem.found() || !inventoryItem.isMain() || !emptyHotbarSlot.found() || !emptyHotbarSlot.isHotbar()) {
+        if (!inventoryItem.found() || !inventoryItem.isMain()) {
             return inventoryItem;
         }
 
-        InvUtils.move().from(inventoryItem.slot()).toHotbar(emptyHotbarSlot.slot());
+        int targetSlot = emptyHotbarSlot.found() && emptyHotbarSlot.isHotbar()
+            ? emptyHotbarSlot.slot()
+            : mc.player.getInventory().getSelectedSlot();
+        InvUtils.move().from(inventoryItem.slot()).toHotbar(targetSlot);
         return InvUtils.findInHotbar(requiredItem);
+    }
+
+    private Item getRequiredItem(BlockState requiredState) {
+        return requiredState.getBlock() == Blocks.GRASS_BLOCK && dirtAsGrass.get()
+            ? Items.DIRT
+            : requiredState.getBlock().asItem();
+    }
+
+    private boolean hasRequiredItem(BlockState requiredState) {
+        Item requiredItem = getRequiredItem(requiredState);
+        FindItemResult hotbarItem = InvUtils.findInHotbar(requiredItem);
+        if (hotbarItem.found()) return true;
+
+        return moveFromInventory.get() && InvUtils.find(requiredItem).isMain();
+    }
+
+    private boolean placeStateAware(BlockPos pos, BlockState currentState, BlockState requiredState, FindItemResult item) {
+        PlacementPlan plan = createPlacementPlan(pos, currentState, requiredState);
+        if (plan == null) return BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
+
+        Runnable interact = () -> {
+            if (!InvUtils.swap(item.slot(), true)) {
+                markPlacementFailed(pos);
+                return;
+            }
+
+            BlockUtils.interact(plan.hitResult(), Hand.MAIN_HAND, swing.get());
+            InvUtils.swapBack();
+        };
+
+        if (rotate.get()) {
+            Direction playerFacing = getPlayerFacing(requiredState);
+            double yaw = playerFacing == null ? Rotations.getYaw(plan.rotationTarget()) : yawFor(playerFacing);
+            Rotations.rotate(yaw, Rotations.getPitch(plan.rotationTarget()), ROTATION_PRIORITY, interact);
+        } else {
+            interact.run();
+        }
+
+        return true;
+    }
+
+    private PlacementPlan createPlacementPlan(BlockPos pos, BlockState currentState, BlockState requiredState) {
+        if (canMergeSlab(currentState, requiredState)) {
+            Vec3d hitPos = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.75, pos.getZ() + 0.5);
+            return new PlacementPlan(new BlockHitResult(hitPos, Direction.UP, pos, false), hitPos);
+        }
+
+        Direction supportDirection = findSupportDirection(pos, requiredState);
+        if (supportDirection == null) return null;
+
+        BlockPos supportPos = pos.offset(supportDirection);
+        Direction clickedFace = supportDirection.getOpposite();
+        Vec3d hitPos = getFaceCenter(supportPos, clickedFace);
+        hitPos = adjustHitPositionForState(hitPos, pos, clickedFace, requiredState);
+        return new PlacementPlan(new BlockHitResult(hitPos, clickedFace, supportPos, false), hitPos);
+    }
+
+    private Direction findSupportDirection(BlockPos pos, BlockState requiredState) {
+        List<Direction> directions = new ArrayList<>();
+
+        if (requiredState.contains(Properties.AXIS)) addAxisDirections(directions, requiredState.get(Properties.AXIS));
+
+        if (requiredState.contains(Properties.SLAB_TYPE)) {
+            SlabType slabType = requiredState.get(Properties.SLAB_TYPE);
+            if (slabType == SlabType.TOP) addDirections(directions, Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, Direction.DOWN);
+            else addDirections(directions, Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, Direction.UP);
+        } else if (requiredState.contains(Properties.BLOCK_HALF)) {
+            BlockHalf half = requiredState.get(Properties.BLOCK_HALF);
+            if (half == BlockHalf.TOP) addDirections(directions, Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, Direction.DOWN);
+            else addDirections(directions, Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, Direction.UP);
+        }
+
+        addDirections(directions, Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, Direction.UP);
+        for (Direction direction : directions) {
+            if (!mc.world.getBlockState(pos.offset(direction)).isReplaceable()) return direction;
+        }
+
+        return null;
+    }
+
+    private static void addAxisDirections(List<Direction> directions, Axis axis) {
+        switch (axis) {
+            case X -> addDirections(directions, Direction.WEST, Direction.EAST);
+            case Y -> addDirections(directions, Direction.DOWN, Direction.UP);
+            case Z -> addDirections(directions, Direction.NORTH, Direction.SOUTH);
+        }
+    }
+
+    private static void addDirections(List<Direction> directions, Direction... additions) {
+        for (Direction direction : additions) {
+            if (!directions.contains(direction)) directions.add(direction);
+        }
+    }
+
+    private static Vec3d getFaceCenter(BlockPos pos, Direction face) {
+        return new Vec3d(
+            pos.getX() + 0.5 + face.getOffsetX() * 0.5,
+            pos.getY() + 0.5 + face.getOffsetY() * 0.5,
+            pos.getZ() + 0.5 + face.getOffsetZ() * 0.5
+        );
+    }
+
+    private static Vec3d adjustHitPositionForState(Vec3d hitPos, BlockPos targetPos, Direction clickedFace, BlockState requiredState) {
+        if (!clickedFace.getAxis().isHorizontal()) return hitPos;
+
+        boolean top = requiredState.contains(Properties.SLAB_TYPE) && requiredState.get(Properties.SLAB_TYPE) == SlabType.TOP
+            || requiredState.contains(Properties.BLOCK_HALF) && requiredState.get(Properties.BLOCK_HALF) == BlockHalf.TOP;
+        if (!requiredState.contains(Properties.SLAB_TYPE) && !requiredState.contains(Properties.BLOCK_HALF)) return hitPos;
+
+        return new Vec3d(hitPos.x, targetPos.getY() + (top ? 0.9 : 0.1), hitPos.z);
+    }
+
+    private Direction getPlayerFacing(BlockState requiredState) {
+        if (!requiredState.contains(Properties.HORIZONTAL_FACING)) return null;
+
+        Direction targetFacing = requiredState.get(Properties.HORIZONTAL_FACING);
+        Block block = requiredState.getBlock();
+        if (block instanceof StairsBlock || block instanceof DoorBlock || block instanceof TrapdoorBlock || block instanceof FenceGateBlock) {
+            return targetFacing;
+        }
+
+        return targetFacing.getOpposite();
+    }
+
+    private static double yawFor(Direction direction) {
+        return switch (direction) {
+            case SOUTH -> 0;
+            case WEST -> 90;
+            case NORTH -> 180;
+            case EAST -> -90;
+            default -> 0;
+        };
+    }
+
+    private void settlePendingPlacements(WorldSchematic schematicWorld) {
+        List<BlockPos> confirmed = new ArrayList<>();
+        List<BlockPos> failed = new ArrayList<>();
+
+        for (Map.Entry<BlockPos, Long> entry : pendingPlacements.entrySet()) {
+            BlockPos pos = entry.getKey();
+            BlockState requiredState = schematicWorld.getBlockState(pos);
+            if (requiredState.isAir() || matchesProjection(mc.world.getBlockState(pos), requiredState)) {
+                confirmed.add(pos);
+                continue;
+            }
+
+            if (tick - entry.getValue() >= PLACEMENT_CONFIRMATION_TICKS) {
+                failed.add(pos);
+            }
+        }
+
+        confirmed.forEach(pendingPlacements::remove);
+        failed.forEach(this::markPlacementFailed);
+    }
+
+    private void updateRenderStatus(BlockPos pos, BlockState currentState, BlockState requiredState, Map<Block, Boolean> materialAvailability) {
+        if (requiredState.isAir()
+            || !mc.player.getBlockPos().isWithinDistance(pos, range.get())
+            || !DataManager.getRenderLayerRange().isPositionWithinRange(pos)) return;
+
+        if (matchesProjection(currentState, requiredState)) {
+            pendingPlacements.remove(pos);
+            failedUntil.remove(pos);
+            renderStatuses.put(pos.toImmutable(), ProjectionStatus.PLACED);
+            return;
+        }
+
+        boolean hasMaterial = materialAvailability.computeIfAbsent(requiredState.getBlock(), ignored -> hasRequiredItem(requiredState));
+        boolean blocked = !canReplaceWithRequiredState(currentState, requiredState)
+            || !requiredState.canPlaceAt(mc.world, pos)
+            || !hasMaterial
+            || mc.player.getBoundingBox().intersects(new Box(pos))
+            || failedUntil.getOrDefault(pos, 0L) > tick;
+        renderStatuses.put(pos.toImmutable(), blocked ? ProjectionStatus.BLOCKED : ProjectionStatus.READY);
+    }
+
+    private void markPlacementFailed(BlockPos pos) {
+        pendingPlacements.remove(pos);
+        failedUntil.put(pos.toImmutable(), tick + FAILED_PLACEMENT_RETRY_TICKS);
+    }
+
+    private static boolean canReplaceWithRequiredState(BlockState currentState, BlockState requiredState) {
+        return currentState.isReplaceable() || canMergeSlab(currentState, requiredState);
+    }
+
+    private static boolean canMergeSlab(BlockState currentState, BlockState requiredState) {
+        return requiredState.contains(Properties.SLAB_TYPE)
+            && requiredState.get(Properties.SLAB_TYPE) == SlabType.DOUBLE
+            && currentState.getBlock() == requiredState.getBlock()
+            && currentState.contains(Properties.SLAB_TYPE)
+            && currentState.get(Properties.SLAB_TYPE) != SlabType.DOUBLE;
+    }
+
+    private static boolean matchesProjection(BlockState currentState, BlockState requiredState) {
+        return currentState.getBlock() == requiredState.getBlock()
+            && matchesProperty(currentState, requiredState, Properties.FACING)
+            && matchesProperty(currentState, requiredState, Properties.HOPPER_FACING)
+            && matchesProperty(currentState, requiredState, Properties.HORIZONTAL_FACING)
+            && matchesProperty(currentState, requiredState, Properties.AXIS)
+            && matchesProperty(currentState, requiredState, Properties.HORIZONTAL_AXIS)
+            && matchesProperty(currentState, requiredState, Properties.BLOCK_HALF)
+            && matchesProperty(currentState, requiredState, Properties.SLAB_TYPE)
+            && matchesProperty(currentState, requiredState, Properties.DOUBLE_BLOCK_HALF);
+    }
+
+    private static <T extends Comparable<T>> boolean matchesProperty(BlockState currentState, BlockState requiredState, Property<T> property) {
+        if (currentState.contains(property) != requiredState.contains(property)) return false;
+        return !requiredState.contains(property) || currentState.get(property).equals(requiredState.get(property));
     }
 
     private boolean passesFilter(Block requiredBlock) {
@@ -228,6 +533,29 @@ public final class LitematicaPrinterModule extends Module {
             case BOTTOM_UP -> candidates.sort(Comparator.comparingInt(BlockPos::getY).thenComparing(nearest));
             case TOP_DOWN -> candidates.sort(Comparator.comparingInt(BlockPos::getY).reversed().thenComparing(nearest));
         }
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!renderStatus.get()) return;
+
+        for (Map.Entry<BlockPos, ProjectionStatus> entry : renderStatuses.entrySet()) {
+            SettingColor color = switch (entry.getValue()) {
+                case READY -> readyColor.get();
+                case PLACED -> placedColor.get();
+                case BLOCKED -> blockedColor.get();
+            };
+
+            event.renderer.box(entry.getKey(), color, color, ShapeMode.Both, 0);
+        }
+    }
+
+    private record PlacementPlan(BlockHitResult hitResult, Vec3d rotationTarget) {}
+
+    private enum ProjectionStatus {
+        READY,
+        PLACED,
+        BLOCKED
     }
 
     public enum FilterMode {
