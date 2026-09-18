@@ -48,7 +48,8 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Direction.Axis;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
+import net.minecraft.util.PlayerInput;
 import net.minecraft.world.RaycastContext;
 
 /** Places missing blocks from the active Litematica projection. */
@@ -480,10 +481,9 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private void setSneaking(boolean sneaking) {
-        ClientCommandC2SPacket.Mode mode = sneaking
-            ? ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY
-            : ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY;
-        mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, mode));
+        mc.player.networkHandler.sendPacket(new PlayerInputC2SPacket(
+            new PlayerInput(false, false, false, false, false, sneaking, false)
+        ));
     }
 
     private static void addAxisDirections(List<Direction> directions, Axis axis) {
