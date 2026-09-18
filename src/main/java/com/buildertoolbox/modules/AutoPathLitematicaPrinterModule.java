@@ -33,7 +33,6 @@ import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -673,7 +672,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     private boolean canSafelyRemoveScaffold(BlockPos pos) {
         if (!mc.player.getBlockPos().isWithinDistance(pos, printer.getPlacementRange())) return false;
-        if (mc.player.getBoundingBox().intersects(new Box(pos))) return false;
+        if (mc.player.getBoundingBox().intersects(new net.minecraft.util.math.Box(pos))) return false;
 
         for (int index = pathIndex; index < path.size(); index++) {
             if (path.get(index).down().equals(pos)) return false;
