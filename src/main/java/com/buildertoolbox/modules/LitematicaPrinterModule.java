@@ -716,6 +716,35 @@ public final class LitematicaPrinterModule extends Module {
         return matchesProjection(currentState, requiredState);
     }
 
+    /**
+     * Whether the active printer can make a placement attempt at this exact moment from the
+     * player's current position. Auto Path uses this before deciding that being in range means
+     * it should stop walking and wait for the printer.
+     */
+    public boolean canPlaceProjectionBlockNow(BlockPos pos, BlockState requiredState) {
+        if (mc.player == null || mc.world == null || requiredState.isAir()) return false;
+
+        BlockState currentState = mc.world.getBlockState(pos);
+        if (!isMissingProjectionBlock(pos, currentState, requiredState)) return false;
+        if (canMergeSlab(currentState, requiredState)) return true;
+
+        for (Direction supportDirection : findSupportDirections(pos, requiredState)) {
+            BlockPos supportPos = pos.offset(supportDirection);
+            Direction clickedFace = supportDirection.getOpposite();
+            Vec3d hitPos = getFaceCenter(supportPos, clickedFace);
+            hitPos = adjustHitPositionForState(hitPos, pos, clickedFace, requiredState);
+            PlacementPlan plan = new PlacementPlan(new BlockHitResult(hitPos, clickedFace, supportPos, false), hitPos);
+            if (isInteractionVisible(plan)) return true;
+        }
+
+        return false;
+    }
+
+    /** Avoid moving the player while this module is awaiting the server's confirmation. */
+    public boolean hasPlacementInFlight() {
+        return inFlightPlacement != null;
+    }
+
     /** The navigation module approaches targets to this printer's configured working distance. */
     public double getPlacementRange() {
         return reach.get();

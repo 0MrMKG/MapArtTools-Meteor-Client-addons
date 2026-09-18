@@ -264,7 +264,8 @@ public final class AutoPathLitematicaPrinterModule extends Module {
             return;
         }
 
-        if (mc.player.getBlockPos().isWithinDistance(activeTarget, printer.getPlacementRange())) {
+        if (mc.player.getBlockPos().isWithinDistance(activeTarget, printer.getPlacementRange())
+            && canWaitForPrinter(schematicWorld)) {
             releaseMovement();
             path = List.of();
             pathIndex = 0;
@@ -280,6 +281,11 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         }
 
         followPath();
+    }
+
+    private boolean canWaitForPrinter(WorldSchematic schematicWorld) {
+        if (printer.hasPlacementInFlight()) return true;
+        return printer.canPlaceProjectionBlockNow(activeTarget, schematicWorld.getBlockState(activeTarget));
     }
 
     private void resetState() {
@@ -536,7 +542,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
                 bestProgress = node;
                 bestDistance = remainingDistance;
             }
-            if (!node.pos().equals(start) && node.pos().isWithinDistance(target, printer.getPlacementRange())) {
+            if (!node.pos().equals(start) && isUsablePlacementStand(node.pos(), target)) {
                 return reconstructPath(previous, node.pos());
             }
 
@@ -558,6 +564,21 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         }
 
         return bestProgress == null ? List.of() : reconstructPath(previous, bestProgress.pos());
+    }
+
+    /**
+     * Reaching a target's centre is not enough: standing inside its still-empty block makes the
+     * printer reject that target. Keep the planned player box clear while remaining in reach.
+     */
+    private boolean isUsablePlacementStand(BlockPos standPos, BlockPos target) {
+        if (!standPos.isWithinDistance(target, printer.getPlacementRange())) return false;
+
+        net.minecraft.util.math.Box projectedPlayerBox = mc.player.getBoundingBox().offset(
+            standPos.getX() + 0.5 - mc.player.getX(),
+            standPos.getY() - mc.player.getY(),
+            standPos.getZ() + 0.5 - mc.player.getZ()
+        );
+        return !projectedPlayerBox.intersects(new net.minecraft.util.math.Box(target));
     }
 
     private boolean isInsideSearchArea(BlockPos start, BlockPos pos) {
