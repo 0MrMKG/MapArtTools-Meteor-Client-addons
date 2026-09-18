@@ -705,6 +705,20 @@ public final class LitematicaPrinterModule extends Module {
             && matchesProperty(currentState, requiredState, Properties.DOUBLE_BLOCK_HALF);
     }
 
+    /** Shared with Auto Path Place Litematica so both modules accept the same substitutions. */
+    public boolean isProjectionSatisfied(BlockState currentState, BlockState requiredState) {
+        return matchesProjection(currentState, requiredState);
+    }
+
+    /** The navigation module approaches targets to this printer's configured working distance. */
+    public int getPlacementRange() {
+        return range.get();
+    }
+
+    public boolean acceptsDirtForGrass() {
+        return dirtAsGrass.get();
+    }
+
     private static <T extends Comparable<T>> boolean matchesProperty(BlockState currentState, BlockState requiredState, Property<T> property) {
         if (currentState.contains(property) != requiredState.contains(property)) return false;
         return !requiredState.contains(property) || currentState.get(property).equals(requiredState.get(property));
