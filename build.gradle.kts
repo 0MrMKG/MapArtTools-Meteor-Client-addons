@@ -9,6 +9,7 @@ base {
 }
 
 repositories {
+    maven("https://api.modrinth.com/maven")
     maven("https://jitpack.io")
     maven("https://maven.fallenbreath.me/releases")
     maven {
