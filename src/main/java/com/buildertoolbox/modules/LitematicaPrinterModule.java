@@ -135,9 +135,9 @@ public final class LitematicaPrinterModule extends Module {
     private final Setting<Integer> confirmationTimeout = sgPlacement.add(new IntSetting.Builder()
         .name("server-confirmation-timeout")
         .description("Ticks to wait for the server's block update before treating a placement as failed.")
-        .defaultValue(20)
-        .range(6, 100)
-        .sliderRange(6, 40)
+        .defaultValue(8)
+        .range(4, 100)
+        .sliderRange(4, 40)
         .build()
     );
 
