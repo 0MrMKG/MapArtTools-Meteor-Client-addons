@@ -55,7 +55,7 @@ import net.minecraft.world.RaycastContext;
 /** Places missing blocks from the active Litematica projection. */
 public final class LitematicaPrinterModule extends Module {
     private static final int ROTATION_PRIORITY = 50;
-    private static final int ROTATION_DISPATCH_TIMEOUT_TICKS = 40;
+    private static final int ROTATION_DISPATCH_TIMEOUT_TICKS = 12;
     private static final int MAX_BACKOFF_MULTIPLIER = 3;
     private static final double RAYCAST_FACE_EPSILON = 0.01;
 
@@ -135,10 +135,10 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Integer> confirmationTimeout = sgPlacement.add(new IntSetting.Builder()
         .name("server-confirmation-timeout")
-        .description("Ticks to wait for the server's exact block-state update before trying another placement plan.")
-        .defaultValue(40)
-        .range(10, 200)
-        .sliderRange(10, 100)
+        .description("Ticks to wait before performing one exact block-state confirmation scan.")
+        .defaultValue(12)
+        .range(4, 100)
+        .sliderRange(4, 40)
         .build()
     );
 
