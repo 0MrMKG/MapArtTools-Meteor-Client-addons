@@ -101,8 +101,8 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Boolean> dirtAsGrass = sgGeneral.add(new BoolSetting.Builder()
         .name("dirt-as-grass")
-        .description("Only use dirt as a fallback for grass-block projections when no grass block is available. Dirt is not an exact projection match.")
-        .defaultValue(false)
+        .description("Allow dirt as an accepted fallback for grass-block projections when no grass block is available.")
+        .defaultValue(true)
         .build()
     );
 
@@ -689,7 +689,11 @@ public final class LitematicaPrinterModule extends Module {
             && currentState.get(Properties.SLAB_TYPE) != SlabType.DOUBLE;
     }
 
-    private static boolean matchesProjection(BlockState currentState, BlockState requiredState) {
+    private boolean matchesProjection(BlockState currentState, BlockState requiredState) {
+        if (dirtAsGrass.get()
+            && requiredState.getBlock() == Blocks.GRASS_BLOCK
+            && currentState.getBlock() == Blocks.DIRT) return true;
+
         return currentState.getBlock() == requiredState.getBlock()
             && matchesProperty(currentState, requiredState, Properties.FACING)
             && matchesProperty(currentState, requiredState, Properties.HOPPER_FACING)
