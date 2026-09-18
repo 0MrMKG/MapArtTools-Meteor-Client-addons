@@ -740,9 +740,9 @@ public final class LitematicaPrinterModule extends Module {
         return false;
     }
 
-    /** Avoid moving the player while this module is awaiting the server's confirmation. */
-    public boolean hasPlacementInFlight() {
-        return inFlightPlacement != null;
+    /** Whether this exact target is awaiting the server's placement confirmation. */
+    public boolean hasPlacementInFlightFor(BlockPos pos) {
+        return inFlightPlacement != null && inFlightPlacement.pos().equals(pos);
     }
 
     /** The navigation module approaches targets to this printer's configured working distance. */

@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
+import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BlockSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
@@ -177,6 +178,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     private long lastScaffoldAttempt;
     private long lastCleanupAttempt;
     private long scanFinishedAt;
+    private String activity = "Idle";
     private boolean startedPrinter;
     private boolean missingSchematicReported;
     private boolean printerDisabledReported;
@@ -190,6 +192,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     @Override
     public void onActivate() {
         resetState();
+        activity = "Scanning";
         printer = Modules.get().get(LitematicaPrinterModule.class);
         if (printer == null) {
             error("Place Litematica is not available.");
@@ -215,18 +218,29 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         resetState();
     }
 
+    @EventHandler
+    private void onGameLeft(GameLeftEvent event) {
+        disable();
+    }
+
     @EventHandler(priority = 100)
     private void onTick(TickEvent.Pre event) {
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null || mc.world == null) {
+            activity = "Waiting for world";
+            releaseMovement();
+            return;
+        }
         tick++;
 
         if (mc.currentScreen != null) {
+            activity = "Paused by screen";
             releaseMovement();
             return;
         }
 
         if (printer == null) printer = Modules.get().get(LitematicaPrinterModule.class);
         if (printer == null || !printer.isActive()) {
+            activity = "Place Litematica is off";
             releaseMovement();
             if (!printerDisabledReported) {
                 warning("Place Litematica must stay enabled while auto path printing.");
@@ -239,6 +253,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
         WorldSchematic schematicWorld = SchematicWorldHandler.getSchematicWorld();
         if (schematicWorld == null) {
+            activity = "No schematic";
             releaseMovement();
             if (!missingSchematicReported) {
                 warning("Load a Litematica schematic before enabling auto path printing.");
@@ -260,14 +275,19 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
         if (activeTarget == null) {
             if (scanLayerComplete && targetCandidates.isEmpty() && !hasDeferredTargetsOnCurrentLayer()) {
-                if (advanceBuildLayer()) return;
+                if (advanceBuildLayer()) {
+                    activity = "Scanning layer " + scanY;
+                    return;
+                }
             }
+            activity = scanLayerComplete ? "Layer " + scanY + " complete" : "Scanning layer " + scanY;
             releaseMovement();
             return;
         }
 
         if (mc.player.getBlockPos().isWithinDistance(activeTarget, printer.getPlacementRange())
             && canWaitForPrinter(schematicWorld)) {
+            activity = "Placing " + formatPos(activeTarget);
             releaseMovement();
             path = List.of();
             pathIndex = 0;
@@ -277,6 +297,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         }
 
         activeTargetSince = 0;
+        activity = "Planning " + formatPos(activeTarget);
         boolean pathFinished = !path.isEmpty() && pathIndex >= path.size();
         if (pathFinished || tick - lastPathTick >= repathDelay.get()) {
             planPath();
@@ -286,8 +307,13 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     }
 
     private boolean canWaitForPrinter(WorldSchematic schematicWorld) {
-        if (printer.hasPlacementInFlight()) return true;
+        if (printer.hasPlacementInFlightFor(activeTarget)) return true;
         return printer.canPlaceProjectionBlockNow(activeTarget, schematicWorld.getBlockState(activeTarget));
+    }
+
+    @Override
+    public String getInfoString() {
+        return activity;
     }
 
     private void resetState() {
@@ -511,6 +537,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         // Only fall back to temporary supports when ordinary local walking and jumping make no progress.
         if (newPath.isEmpty() && useScaffolding.get()) newPath = findProgressPath(start, activeTarget, true);
         if (newPath.isEmpty()) {
+            activity = "No route " + formatPos(activeTarget);
             path = List.of();
             pathIndex = 0;
             if (noProgressSince == 0) noProgressSince = tick;
@@ -521,6 +548,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         noProgressSince = 0;
         path = newPath;
         pathIndex = path.size() > 1 ? 1 : 0;
+        activity = "Walking " + formatPos(activeTarget);
     }
 
     private List<BlockPos> findProgressPath(BlockPos start, BlockPos target, boolean allowScaffolding) {
@@ -623,6 +651,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     private void followPath() {
         if (path.isEmpty() || pathIndex >= path.size()) {
+            if (path.isEmpty() && activeTarget != null) activity = "No route " + formatPos(activeTarget);
             releaseMovement();
             return;
         }
@@ -634,12 +663,14 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         }
 
         if (needsScaffold(next)) {
+            activity = "Scaffolding " + formatPos(next.down());
             releaseMovement();
             ensureScaffold(next.down());
             return;
         }
 
         faceToward(next);
+        activity = "Walking " + formatPos(next);
         setKeyPressed(mc.options.forwardKey, true);
         setKeyPressed(mc.options.jumpKey, jump.get() && next.getY() > mc.player.getBlockPos().getY());
     }
@@ -752,6 +783,10 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     private static void setKeyPressed(KeyBinding key, boolean pressed) {
         key.setPressed(pressed);
         Input.setKeyState(key, pressed);
+    }
+
+    private static String formatPos(BlockPos pos) {
+        return pos.getX() + "," + pos.getY() + "," + pos.getZ();
     }
 
     private record ScanBox(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {}
