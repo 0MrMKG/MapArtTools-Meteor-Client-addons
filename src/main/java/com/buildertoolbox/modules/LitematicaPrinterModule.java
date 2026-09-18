@@ -23,6 +23,7 @@ import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockIterator;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
@@ -204,6 +205,16 @@ public final class LitematicaPrinterModule extends Module {
         .name("render-status")
         .description("Render nearby non-air projection blocks by their placement status.")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> renderOpacity = sgRendering.add(new IntSetting.Builder()
+        .name("opacity")
+        .description("Global opacity multiplier for blue and red projection status rendering.")
+        .defaultValue(255)
+        .range(0, 255)
+        .sliderRange(0, 255)
+        .visible(renderStatus::get)
         .build()
     );
 
@@ -716,10 +727,16 @@ public final class LitematicaPrinterModule extends Module {
         if (!renderStatus.get()) return;
 
         for (Map.Entry<BlockPos, ProjectionStatus> entry : renderStatuses.entrySet()) {
-            SettingColor color = switch (entry.getValue()) {
+            SettingColor sourceColor = switch (entry.getValue()) {
                 case READY -> readyColor.get();
                 case BLOCKED -> blockedColor.get();
             };
+            Color color = new Color(
+                sourceColor.r,
+                sourceColor.g,
+                sourceColor.b,
+                sourceColor.a * renderOpacity.get() / 255
+            );
 
             event.renderer.box(entry.getKey(), color, color, ShapeMode.Both, 0);
         }
