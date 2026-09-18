@@ -77,6 +77,13 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         .build()
     );
 
+    private final Setting<Boolean> debugLog = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug-log")
+        .description("Write state changes, projection scans, selected targets, and A* results to chat for navigation diagnostics.")
+        .defaultValue(true)
+        .build()
+    );
+
     private final Setting<Integer> waitForPrinter = sgGeneral.add(new IntSetting.Builder()
         .name("wait-for-printer")
         .description("Ticks to wait at an in-range target before temporarily skipping it when it cannot be printed.")
@@ -216,6 +223,8 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     private long lastCleanupAttempt;
     private long scanFinishedAt;
     private String activity = "Idle";
+    private String loggedActivityKind = "";
+    private String lastPathReport = "";
     private boolean startedPrinter;
     private boolean missingSchematicReported;
     private boolean printerDisabledReported;
@@ -229,7 +238,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     @Override
     public void onActivate() {
         resetState();
-        activity = "Scanning";
+        setActivity("Scanning");
         printer = Modules.get().get(LitematicaPrinterModule.class);
         if (printer == null) {
             error("Place Litematica is not available.");
@@ -257,27 +266,28 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     @EventHandler
     private void onGameLeft(GameLeftEvent event) {
+        debug("Game left: disabling Auto Path Place Litematica.");
         disable();
     }
 
     @EventHandler(priority = 100)
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) {
-            activity = "Waiting for world";
+            setActivity("Waiting for world");
             releaseMovement();
             return;
         }
         tick++;
 
         if (mc.currentScreen != null) {
-            activity = "Paused by screen";
+            setActivity("Paused by screen");
             releaseMovement();
             return;
         }
 
         if (printer == null) printer = Modules.get().get(LitematicaPrinterModule.class);
         if (printer == null || !printer.isActive()) {
-            activity = "Place Litematica is off";
+            setActivity("Place Litematica is off");
             releaseMovement();
             if (!printerDisabledReported) {
                 warning("Place Litematica must stay enabled while auto path printing.");
@@ -290,7 +300,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
         WorldSchematic schematicWorld = SchematicWorldHandler.getSchematicWorld();
         if (schematicWorld == null) {
-            activity = "No schematic";
+            setActivity("No schematic");
             releaseMovement();
             if (!missingSchematicReported) {
                 warning("Load a Litematica schematic before enabling auto path printing.");
@@ -313,18 +323,18 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         if (activeTarget == null) {
             if (scanLayerComplete && targetCandidates.isEmpty() && !hasDeferredTargetsOnCurrentLayer()) {
                 if (advanceBuildLayer()) {
-                    activity = "Scanning layer " + scanY;
+                    setActivity("Scanning layer " + scanY);
                     return;
                 }
             }
-            activity = scanLayerComplete ? "Layer " + scanY + " complete" : "Scanning layer " + scanY;
+            setActivity(scanLayerComplete ? "No eligible targets on layer " + scanY : "Scanning layer " + scanY);
             releaseMovement();
             return;
         }
 
         if (mc.player.getBlockPos().isWithinDistance(activeTarget, printer.getPlacementRange())
             && canWaitForPrinter(schematicWorld)) {
-            activity = "Placing " + formatPos(activeTarget);
+            setActivity("Placing " + formatPos(activeTarget));
             releaseMovement();
             path = List.of();
             pathIndex = 0;
@@ -334,7 +344,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         }
 
         activeTargetSince = 0;
-        activity = "Planning " + formatPos(activeTarget);
+        setActivity("Planning " + formatPos(activeTarget));
         boolean pathFinished = !path.isEmpty() && pathIndex >= path.size();
         if (pathFinished || tick - lastPathTick >= repathDelay.get()) {
             planPath();
@@ -377,6 +387,9 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         lastScaffoldAttempt = Long.MIN_VALUE;
         lastCleanupAttempt = Long.MIN_VALUE;
         scanFinishedAt = 0;
+        activity = "Idle";
+        loggedActivityKind = "";
+        lastPathReport = "";
         missingSchematicReported = false;
         printerDisabledReported = false;
         missingScaffoldReported = false;
@@ -407,8 +420,10 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         if (!scanBoxes.isEmpty()) {
             scanBoxes.sort(Comparator.comparingInt(ScanBox::minY));
             beginBuildLayer(scanMinY);
+            debug("Found %d enabled projection box(es), scanning layers %d through %d.", scanBoxes.size(), scanMinY, scanMaxY);
         } else {
             scanLayerComplete = true;
+            debug("No enabled and rendered Litematica projection boxes were found.");
         }
         scanFinishedAt = 0;
     }
@@ -521,6 +536,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         if (best != null) {
             targetCandidates.remove(best);
             queuedTargets.remove(best);
+            debug("Selected target %s from %d queued candidate(s).", formatPos(best), targetCandidates.size() + 1);
         }
         return best;
     }
@@ -570,11 +586,16 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         lastPathTick = tick;
         BlockPos start = mc.player.getBlockPos();
         List<BlockPos> newPath = findProgressPath(start, activeTarget, false);
+        boolean scaffoldingPath = false;
 
         // Only fall back to temporary supports when ordinary local walking and jumping make no progress.
-        if (newPath.isEmpty() && useScaffolding.get()) newPath = findProgressPath(start, activeTarget, true);
+        if (newPath.isEmpty() && useScaffolding.get()) {
+            newPath = findProgressPath(start, activeTarget, true);
+            scaffoldingPath = !newPath.isEmpty();
+        }
         if (newPath.isEmpty()) {
-            activity = "No route " + formatPos(activeTarget);
+            reportPath(start, newPath, false);
+            setActivity("No route " + formatPos(activeTarget));
             path = List.of();
             pathIndex = 0;
             if (noProgressSince == 0) noProgressSince = tick;
@@ -585,7 +606,8 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         noProgressSince = 0;
         path = newPath;
         pathIndex = path.size() > 1 ? 1 : 0;
-        activity = "Walking " + formatPos(activeTarget);
+        reportPath(start, newPath, scaffoldingPath);
+        setActivity("Walking " + formatPos(activeTarget));
     }
 
     private List<BlockPos> findProgressPath(BlockPos start, BlockPos target, boolean allowScaffolding) {
@@ -688,7 +710,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     private void followPath() {
         if (path.isEmpty() || pathIndex >= path.size()) {
-            if (path.isEmpty() && activeTarget != null) activity = "No route " + formatPos(activeTarget);
+            if (path.isEmpty() && activeTarget != null) setActivity("No route " + formatPos(activeTarget));
             releaseMovement();
             return;
         }
@@ -700,14 +722,14 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         }
 
         if (needsScaffold(next)) {
-            activity = "Scaffolding " + formatPos(next.down());
+            setActivity("Scaffolding " + formatPos(next.down()));
             releaseMovement();
             ensureScaffold(next.down());
             return;
         }
 
         faceToward(next);
-        activity = "Walking " + formatPos(next);
+        setActivity("Walking " + formatPos(next));
         setKeyPressed(mc.options.forwardKey, true);
         setKeyPressed(mc.options.jumpKey, jump.get() && next.getY() > mc.player.getBlockPos().getY());
     }
@@ -824,6 +846,35 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     private static String formatPos(BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    private void setActivity(String nextActivity) {
+        if (activity.equals(nextActivity)) return;
+
+        activity = nextActivity;
+        String kind = nextActivity.contains(" ") ? nextActivity.substring(0, nextActivity.indexOf(' ')) : nextActivity;
+        if (!kind.equals(loggedActivityKind)) {
+            loggedActivityKind = kind;
+            debug("State: %s", nextActivity);
+        }
+    }
+
+    private void reportPath(BlockPos start, List<BlockPos> newPath, boolean scaffoldingPath) {
+        String report = formatPos(start) + "->" + formatPos(activeTarget) + ":" + newPath.size() + ":" + scaffoldingPath;
+        if (report.equals(lastPathReport)) return;
+
+        lastPathReport = report;
+        if (newPath.isEmpty()) {
+            debug("A* found no route from %s to target %s (local radius %d, max nodes %d).", formatPos(start), formatPos(activeTarget), pathDistance.get(), maxPathNodes.get());
+            return;
+        }
+
+        BlockPos next = newPath.size() > 1 ? newPath.get(1) : newPath.get(0);
+        debug("A* route: %d node(s), next %s, target %s%s.", newPath.size(), formatPos(next), formatPos(activeTarget), scaffoldingPath ? " (scaffold fallback)" : "");
+    }
+
+    private void debug(String message, Object... arguments) {
+        if (debugLog.get()) info("[Auto Path] " + message, arguments);
     }
 
     @EventHandler
