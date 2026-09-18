@@ -23,6 +23,7 @@ import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.utils.misc.input.Input;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
@@ -30,6 +31,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.client.option.KeyBinding;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
@@ -213,8 +215,8 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         resetState();
     }
 
-    @EventHandler
-    private void onTick(TickEvent.Post event) {
+    @EventHandler(priority = 100)
+    private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
         tick++;
 
@@ -638,8 +640,8 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         }
 
         faceToward(next);
-        mc.options.forwardKey.setPressed(true);
-        mc.options.jumpKey.setPressed(jump.get() && next.getY() > mc.player.getBlockPos().getY());
+        setKeyPressed(mc.options.forwardKey, true);
+        setKeyPressed(mc.options.jumpKey, jump.get() && next.getY() > mc.player.getBlockPos().getY());
     }
 
     private boolean hasReached(BlockPos pos) {
@@ -739,8 +741,17 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     private void releaseMovement() {
         if (mc.options == null) return;
-        mc.options.forwardKey.setPressed(false);
-        mc.options.jumpKey.setPressed(false);
+        setKeyPressed(mc.options.forwardKey, false);
+        setKeyPressed(mc.options.jumpKey, false);
+    }
+
+    /**
+     * Meteor reads its virtual input state during the player-input tick. Updating only the
+     * vanilla KeyBinding is overwritten by that input refresh and does not move the player.
+     */
+    private static void setKeyPressed(KeyBinding key, boolean pressed) {
+        key.setPressed(pressed);
+        Input.setKeyState(key, pressed);
     }
 
     private record ScanBox(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {}
