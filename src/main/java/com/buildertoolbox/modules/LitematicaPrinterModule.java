@@ -135,7 +135,7 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Integer> confirmationTimeout = sgPlacement.add(new IntSetting.Builder()
         .name("server-confirmation-timeout")
-        .description("Ticks to wait before performing one exact block-state confirmation scan.")
+        .description("Maximum ticks to wait for one matching block-state scan before treating a placement as failed.")
         .defaultValue(12)
         .range(4, 100)
         .sliderRange(4, 40)
@@ -215,14 +215,6 @@ public final class LitematicaPrinterModule extends Module {
         .build()
     );
 
-    private final Setting<SettingColor> placedColor = sgRendering.add(new ColorSetting.Builder()
-        .name("placed-color")
-        .description("Green: the world matches the relevant placement state of the projection block.")
-        .defaultValue(new SettingColor(70, 210, 95, 80))
-        .visible(renderStatus::get)
-        .build()
-    );
-
     private final Setting<SettingColor> blockedColor = sgRendering.add(new ColorSetting.Builder()
         .name("blocked-color")
         .description("Red: the block cannot currently be placed or has an incorrect placement state.")
@@ -233,6 +225,7 @@ public final class LitematicaPrinterModule extends Module {
 
     private final List<BlockPos> candidates = new ArrayList<>();
     private final Map<BlockPos, ProjectionStatus> renderStatuses = new HashMap<>();
+    private final Map<BlockPos, ProjectionStatus> nextRenderStatuses = new HashMap<>();
     private final Map<BlockPos, RetryState> failedPlacements = new HashMap<>();
     private InFlightPlacement inFlightPlacement;
     private int delayTicks;
@@ -247,6 +240,7 @@ public final class LitematicaPrinterModule extends Module {
     public void onActivate() {
         candidates.clear();
         renderStatuses.clear();
+        nextRenderStatuses.clear();
         failedPlacements.clear();
         inFlightPlacement = null;
         delayTicks = 0;
@@ -258,6 +252,7 @@ public final class LitematicaPrinterModule extends Module {
     public void onDeactivate() {
         candidates.clear();
         renderStatuses.clear();
+        nextRenderStatuses.clear();
         failedPlacements.clear();
         inFlightPlacement = null;
     }
@@ -270,6 +265,7 @@ public final class LitematicaPrinterModule extends Module {
         WorldSchematic schematicWorld = SchematicWorldHandler.getSchematicWorld();
         if (schematicWorld == null) {
             renderStatuses.clear();
+            nextRenderStatuses.clear();
             failedPlacements.clear();
             inFlightPlacement = null;
             if (!missingSchematicReported) {
@@ -285,16 +281,20 @@ public final class LitematicaPrinterModule extends Module {
         delayTicks = 0;
 
         candidates.clear();
-        renderStatuses.clear();
+        nextRenderStatuses.clear();
         Map<Block, Boolean> materialAvailability = new HashMap<>();
         int scanRange = range.get() + 1;
         BlockIterator.register(scanRange, scanRange, (pos, currentState) -> {
             BlockState requiredState = schematicWorld.getBlockState(pos);
-            updateRenderStatus(pos, currentState, requiredState, materialAvailability);
+            updateRenderStatus(pos, currentState, requiredState, materialAvailability, nextRenderStatuses);
             if (isMissingProjectionBlock(pos, currentState, requiredState)) candidates.add(pos.toImmutable());
         });
 
-        BlockIterator.after(() -> placeCandidates(schematicWorld));
+        BlockIterator.after(() -> {
+            renderStatuses.clear();
+            renderStatuses.putAll(nextRenderStatuses);
+            placeCandidates(schematicWorld);
+        });
     }
 
     private boolean isMissingProjectionBlock(BlockPos pos, BlockState currentState, BlockState requiredState) {
@@ -574,8 +574,6 @@ public final class LitematicaPrinterModule extends Module {
             return;
         }
 
-        if (tick - inFlightPlacement.sentAt() < confirmationTimeout.get()) return;
-
         BlockState requiredState = schematicWorld.getBlockState(pos);
         if (requiredState.isAir() || matchesProjection(mc.world.getBlockState(pos), requiredState)) {
             failedPlacements.remove(pos);
@@ -583,17 +581,22 @@ public final class LitematicaPrinterModule extends Module {
             return;
         }
 
-        markPlacementFailed(pos);
+        if (tick - inFlightPlacement.sentAt() >= confirmationTimeout.get()) markPlacementFailed(pos);
     }
 
-    private void updateRenderStatus(BlockPos pos, BlockState currentState, BlockState requiredState, Map<Block, Boolean> materialAvailability) {
+    private void updateRenderStatus(
+        BlockPos pos,
+        BlockState currentState,
+        BlockState requiredState,
+        Map<Block, Boolean> materialAvailability,
+        Map<BlockPos, ProjectionStatus> statuses
+    ) {
         if (requiredState.isAir()
             || !mc.player.getBlockPos().isWithinDistance(pos, range.get())
             || !DataManager.getRenderLayerRange().isPositionWithinRange(pos)) return;
 
         if (matchesProjection(currentState, requiredState)) {
             failedPlacements.remove(pos);
-            renderStatuses.put(pos.toImmutable(), ProjectionStatus.PLACED);
             return;
         }
 
@@ -603,7 +606,7 @@ public final class LitematicaPrinterModule extends Module {
             || !hasMaterial
             || mc.player.getBoundingBox().intersects(new Box(pos))
             || failedPlacements.containsKey(pos);
-        renderStatuses.put(pos.toImmutable(), blocked ? ProjectionStatus.BLOCKED : ProjectionStatus.READY);
+        statuses.put(pos.toImmutable(), blocked ? ProjectionStatus.BLOCKED : ProjectionStatus.READY);
     }
 
     private void markPlacementFailed(BlockPos pos) {
@@ -715,7 +718,6 @@ public final class LitematicaPrinterModule extends Module {
         for (Map.Entry<BlockPos, ProjectionStatus> entry : renderStatuses.entrySet()) {
             SettingColor color = switch (entry.getValue()) {
                 case READY -> readyColor.get();
-                case PLACED -> placedColor.get();
                 case BLOCKED -> blockedColor.get();
             };
 
@@ -736,7 +738,6 @@ public final class LitematicaPrinterModule extends Module {
 
     private enum ProjectionStatus {
         READY,
-        PLACED,
         BLOCKED
     }
 
