@@ -55,8 +55,9 @@ import net.minecraft.world.RaycastContext;
 /** Places missing blocks from the active Litematica projection. */
 public final class LitematicaPrinterModule extends Module {
     private static final int ROTATION_PRIORITY = 50;
-    private static final int ROTATION_DISPATCH_TIMEOUT_TICKS = 5;
+    private static final int ROTATION_DISPATCH_TIMEOUT_TICKS = 10;
     private static final int MAX_BACKOFF_MULTIPLIER = 3;
+    private static final double RAYCAST_FACE_EPSILON = 0.01;
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgPlacement = settings.createGroup("Placement");
@@ -135,7 +136,7 @@ public final class LitematicaPrinterModule extends Module {
     private final Setting<Integer> confirmationTimeout = sgPlacement.add(new IntSetting.Builder()
         .name("server-confirmation-timeout")
         .description("Ticks to wait for the server's block update before treating a placement as failed.")
-        .defaultValue(8)
+        .defaultValue(10)
         .range(4, 100)
         .sliderRange(4, 40)
         .build()
@@ -460,9 +461,15 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private boolean isInteractionVisible(PlacementPlan plan) {
+        Direction clickedFace = plan.hitResult().getSide();
+        Vec3d raycastEnd = plan.hitResult().getPos().subtract(
+            clickedFace.getOffsetX() * RAYCAST_FACE_EPSILON,
+            clickedFace.getOffsetY() * RAYCAST_FACE_EPSILON,
+            clickedFace.getOffsetZ() * RAYCAST_FACE_EPSILON
+        );
         HitResult raycast = mc.world.raycast(new RaycastContext(
             mc.player.getEyePos(),
-            plan.hitResult().getPos(),
+            raycastEnd,
             RaycastContext.ShapeType.COLLIDER,
             RaycastContext.FluidHandling.NONE,
             mc.player
@@ -580,7 +587,7 @@ public final class LitematicaPrinterModule extends Module {
             || !requiredState.canPlaceAt(mc.world, pos)
             || !hasMaterial
             || mc.player.getBoundingBox().intersects(new Box(pos))
-            || !canRetry(pos);
+            || failedPlacements.containsKey(pos);
         renderStatuses.put(pos.toImmutable(), blocked ? ProjectionStatus.BLOCKED : ProjectionStatus.READY);
     }
 
