@@ -101,8 +101,8 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Boolean> dirtAsGrass = sgGeneral.add(new BoolSetting.Builder()
         .name("dirt-as-grass")
-        .description("Use dirt for grass-block projections when grass blocks are unavailable.")
-        .defaultValue(true)
+        .description("Only use dirt as a fallback for grass-block projections when no grass block is available. Dirt is not an exact projection match.")
+        .defaultValue(false)
         .build()
     );
 
@@ -317,10 +317,16 @@ public final class LitematicaPrinterModule extends Module {
             && mc.player.getBlockPos().isWithinDistance(pos, range.get())
             && !mc.player.getBoundingBox().intersects(new Box(pos))
             && DataManager.getRenderLayerRange().isPositionWithinRange(pos)
-            && requiredState.canPlaceAt(mc.world, pos)
+            && canAttemptPlacement(requiredState, pos)
             && hasRequiredItem(requiredState)
             && inFlightPlacement == null
             && canRetry(pos);
+    }
+
+    private boolean canAttemptPlacement(BlockState requiredState, BlockPos pos) {
+        // Grass may be placed by a player even where its later survival check fails.
+        // Do not discard that candidate before the normal placement path can try it.
+        return requiredState.getBlock() == Blocks.GRASS_BLOCK || requiredState.canPlaceAt(mc.world, pos);
     }
 
     private void placeCandidates(WorldSchematic schematicWorld) {
@@ -377,9 +383,10 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private Item getRequiredItem(BlockState requiredState) {
-        return requiredState.getBlock() == Blocks.GRASS_BLOCK && dirtAsGrass.get()
-            ? Items.DIRT
-            : requiredState.getBlock().asItem();
+        if (requiredState.getBlock() != Blocks.GRASS_BLOCK) return requiredState.getBlock().asItem();
+
+        Item grassBlock = Blocks.GRASS_BLOCK.asItem();
+        return !dirtAsGrass.get() || InvUtils.find(grassBlock).found() ? grassBlock : Items.DIRT;
     }
 
     private boolean hasRequiredItem(BlockState requiredState) {
@@ -613,7 +620,7 @@ public final class LitematicaPrinterModule extends Module {
 
         boolean hasMaterial = materialAvailability.computeIfAbsent(requiredState.getBlock(), ignored -> hasRequiredItem(requiredState));
         boolean blocked = !canReplaceWithRequiredState(currentState, requiredState)
-            || !requiredState.canPlaceAt(mc.world, pos)
+            || !canAttemptPlacement(requiredState, pos)
             || !hasMaterial
             || mc.player.getBoundingBox().intersects(new Box(pos))
             || failedPlacements.containsKey(pos);
