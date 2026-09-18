@@ -341,7 +341,9 @@ public final class LitematicaPrinterModule extends Module {
             return false;
         }
 
-        if (stateAwarePlacement.get()) return placeStateAware(pos, currentState, requiredState, item);
+        if (stateAwarePlacement.get() && requiresStateAwarePlacement(requiredState)) {
+            return placeStateAware(pos, currentState, requiredState, item);
+        }
 
         boolean placed = BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
         if (placed) beginWaitingForConfirmation(pos, getSupportVariant(pos));
@@ -377,12 +379,25 @@ public final class LitematicaPrinterModule extends Module {
         return moveFromInventory.get() && InvUtils.find(requiredItem).isMain();
     }
 
+    private static boolean requiresStateAwarePlacement(BlockState requiredState) {
+        return requiredState.contains(Properties.FACING)
+            || requiredState.contains(Properties.HOPPER_FACING)
+            || requiredState.contains(Properties.HORIZONTAL_FACING)
+            || requiredState.contains(Properties.AXIS)
+            || requiredState.contains(Properties.HORIZONTAL_AXIS)
+            || requiredState.contains(Properties.BLOCK_HALF)
+            || requiredState.contains(Properties.SLAB_TYPE)
+            || requiredState.contains(Properties.DOUBLE_BLOCK_HALF);
+    }
+
     private boolean placeStateAware(BlockPos pos, BlockState currentState, BlockState requiredState, FindItemResult item) {
         int supportVariant = getSupportVariant(pos);
         PlacementPlan plan = createPlacementPlan(pos, currentState, requiredState, supportVariant);
         if (plan == null) {
-            markPlacementFailed(pos);
-            return false;
+            boolean placed = BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
+            if (placed) beginWaitingForConfirmation(pos, supportVariant);
+            else markPlacementFailed(pos);
+            return placed;
         }
 
         inFlightPlacement = new InFlightPlacement(pos.toImmutable(), supportVariant, tick, -1, PlacementPhase.SCHEDULED);
@@ -417,11 +432,11 @@ public final class LitematicaPrinterModule extends Module {
     private PlacementPlan createPlacementPlan(BlockPos pos, BlockState currentState, BlockState requiredState, int supportVariant) {
         if (canMergeSlab(currentState, requiredState)) {
             Vec3d hitPos = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.75, pos.getZ() + 0.5);
-            PlacementPlan plan = new PlacementPlan(new BlockHitResult(hitPos, Direction.UP, pos, false), hitPos);
-            return isInteractionVisible(plan) ? plan : null;
+            return new PlacementPlan(new BlockHitResult(hitPos, Direction.UP, pos, false), hitPos);
         }
 
         List<Direction> validSupports = findSupportDirections(pos, requiredState);
+        PlacementPlan fallback = null;
         for (int offset = 0; offset < validSupports.size(); offset++) {
             Direction supportDirection = validSupports.get(Math.floorMod(supportVariant + offset, validSupports.size()));
             BlockPos supportPos = pos.offset(supportDirection);
@@ -431,9 +446,10 @@ public final class LitematicaPrinterModule extends Module {
 
             PlacementPlan plan = new PlacementPlan(new BlockHitResult(hitPos, clickedFace, supportPos, false), hitPos);
             if (isInteractionVisible(plan)) return plan;
+            if (fallback == null) fallback = plan;
         }
 
-        return null;
+        return fallback;
     }
 
     private List<Direction> findSupportDirections(BlockPos pos, BlockState requiredState) {
