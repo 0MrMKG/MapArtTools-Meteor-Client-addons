@@ -117,7 +117,7 @@ public final class LitematicaPrinterModule extends Module {
     private boolean missingSchematicReported;
 
     public LitematicaPrinterModule() {
-        super(BuilderToolboxAddon.CATEGORY, "投影打印", "自动放置当前 Litematica 投影中缺失的方块。");
+        super(BuilderToolboxAddon.CATEGORY, "place-litematica", "自动放置当前 Litematica 投影中缺失的方块。");
     }
 
     @Override
