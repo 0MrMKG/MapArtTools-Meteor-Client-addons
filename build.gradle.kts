@@ -26,6 +26,7 @@ dependencies {
     minecraft(libs.minecraft)
     mappings(variantOf(libs.yarn) { classifier("v2") })
     modImplementation(libs.fabric.loader)
+    modImplementation(libs.fabric.api)
     modImplementation(libs.meteor.client)
     modImplementation(libs.litematica) {
         exclude(group = "fi.dy.masa.malilib")
