@@ -14,6 +14,7 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BlockListSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -65,12 +66,12 @@ public final class LitematicaPrinterModule extends Module {
     private final SettingGroup sgFilter = settings.createGroup("Filter");
     private final SettingGroup sgRendering = settings.createGroup("Rendering");
 
-    private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
-        .name("range")
-        .description("Maximum distance from the player for projection blocks to be placed.")
-        .defaultValue(4)
-        .range(1, 6)
-        .sliderRange(1, 6)
+    private final Setting<Double> reach = sgGeneral.add(new DoubleSetting.Builder()
+        .name("reach")
+        .description("Effective hand reach for printing. Default 4.25 keeps a 0.25-block safety margin below vanilla's 4.5-block maximum.")
+        .defaultValue(4.25)
+        .range(1.0, 4.5)
+        .sliderRange(1.0, 4.5)
         .build()
     );
 
@@ -294,7 +295,7 @@ public final class LitematicaPrinterModule extends Module {
         candidates.clear();
         nextRenderStatuses.clear();
         Map<Block, Boolean> materialAvailability = new HashMap<>();
-        int scanRange = range.get() + 1;
+        int scanRange = (int) Math.ceil(reach.get()) + 1;
         BlockIterator.register(scanRange, scanRange, (pos, currentState) -> {
             BlockState requiredState = schematicWorld.getBlockState(pos);
             updateRenderStatus(pos, currentState, requiredState, materialAvailability, nextRenderStatuses);
@@ -314,7 +315,7 @@ public final class LitematicaPrinterModule extends Module {
             && requiredState.getFluidState().isEmpty()
             && !matchesProjection(currentState, requiredState)
             && passesFilter(requiredState.getBlock())
-            && mc.player.getBlockPos().isWithinDistance(pos, range.get())
+            && mc.player.getBlockPos().isWithinDistance(pos, reach.get())
             && !mc.player.getBoundingBox().intersects(new Box(pos))
             && DataManager.getRenderLayerRange().isPositionWithinRange(pos)
             && canAttemptPlacement(requiredState, pos)
@@ -610,7 +611,7 @@ public final class LitematicaPrinterModule extends Module {
         Map<BlockPos, ProjectionStatus> statuses
     ) {
         if (requiredState.isAir()
-            || !mc.player.getBlockPos().isWithinDistance(pos, range.get())
+            || !mc.player.getBlockPos().isWithinDistance(pos, reach.get())
             || !DataManager.getRenderLayerRange().isPositionWithinRange(pos)) return;
 
         if (matchesProjection(currentState, requiredState)) {
@@ -711,8 +712,8 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     /** The navigation module approaches targets to this printer's configured working distance. */
-    public int getPlacementRange() {
-        return range.get();
+    public double getPlacementRange() {
+        return reach.get();
     }
 
     public boolean acceptsDirtForGrass() {

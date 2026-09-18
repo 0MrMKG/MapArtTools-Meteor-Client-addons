@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -32,6 +33,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -121,7 +123,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     private final Setting<Boolean> useScaffolding = sgScaffold.add(new BoolSetting.Builder()
         .name("use-scaffolding")
-        .description("Bridge short gaps using a temporary block outside the projection before walking across it.")
+        .description("Only use temporary bridge supports when normal walking and jumping cannot reach the target.")
         .defaultValue(true)
         .build()
     );
@@ -142,14 +144,24 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         .build()
     );
 
+    private final Setting<Boolean> removeScaffolding = sgScaffold.add(new BoolSetting.Builder()
+        .name("remove-temporary-scaffolding")
+        .description("Break only scaffolding placed by this module once it no longer supports the route, then print the projection block there.")
+        .defaultValue(true)
+        .visible(useScaffolding::get)
+        .build()
+    );
+
     private final List<ScanBox> scanBoxes = new ArrayList<>();
     private final List<BlockPos> targetCandidates = new ArrayList<>();
     private final Set<BlockPos> queuedTargets = new HashSet<>();
+    private final Set<BlockPos> temporaryScaffolds = new HashSet<>();
     private final Map<BlockPos, Long> deferredTargets = new HashMap<>();
     private List<BlockPos> path = List.of();
     private LitematicaPrinterModule printer;
     private BlockPos activeTarget;
     private BlockPos lastScaffoldPos;
+    private BlockPos lastCleanupPos;
     private int scanBoxIndex;
     private int scanX;
     private int scanY;
@@ -159,6 +171,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     private long activeTargetSince;
     private long lastPathTick;
     private long lastScaffoldAttempt;
+    private long lastCleanupAttempt;
     private long scanFinishedAt;
     private boolean startedPrinter;
     private boolean missingSchematicReported;
@@ -229,6 +242,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
         if (scanBoxes.isEmpty() || tick - scanFinishedAt >= 200) refreshScanBoxes();
         scanForTargets(schematicWorld);
+        cleanupTemporaryScaffolds(schematicWorld);
 
         if (activeTarget != null && !isTargetCandidate(activeTarget, schematicWorld)) clearActiveTarget();
         if (activeTarget == null) activeTarget = selectNextTarget(schematicWorld);
@@ -249,20 +263,22 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
         activeTargetSince = 0;
         if (path.isEmpty() || pathIndex >= path.size() || tick - lastPathTick >= repathDelay.get()) {
-            planPath(schematicWorld);
+            planPath();
         }
 
-        followPath(schematicWorld);
+        followPath();
     }
 
     private void resetState() {
         scanBoxes.clear();
         targetCandidates.clear();
         queuedTargets.clear();
+        temporaryScaffolds.clear();
         deferredTargets.clear();
         path = List.of();
         activeTarget = null;
         lastScaffoldPos = null;
+        lastCleanupPos = null;
         scanBoxIndex = 0;
         scanX = 0;
         scanY = 0;
@@ -272,6 +288,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         activeTargetSince = 0;
         lastPathTick = 0;
         lastScaffoldAttempt = Long.MIN_VALUE;
+        lastCleanupAttempt = Long.MIN_VALUE;
         scanFinishedAt = 0;
         missingSchematicReported = false;
         printerDisabledReported = false;
@@ -413,15 +430,20 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         pathIndex = 0;
     }
 
-    private void planPath(WorldSchematic schematicWorld) {
+    private void planPath() {
         lastPathTick = tick;
-        BlockPos goal = findNavigationGoal(activeTarget);
-        if (goal == null) {
-            deferActiveTarget();
-            return;
-        }
+        BlockPos start = mc.player.getBlockPos();
+        List<BlockPos> newPath = List.of();
 
-        List<BlockPos> newPath = findPath(mc.player.getBlockPos(), goal, schematicWorld);
+        // Prefer a route that only walks and jumps on solid terrain or already-built blocks.
+        BlockPos normalGoal = findNavigationGoal(activeTarget, false);
+        if (normalGoal != null) newPath = findPath(start, normalGoal, false);
+
+        // Only fall back to temporary supports when ordinary jump traversal cannot reach the target.
+        if (newPath.isEmpty() && useScaffolding.get()) {
+            BlockPos scaffoldGoal = findNavigationGoal(activeTarget, true);
+            if (scaffoldGoal != null) newPath = findPath(start, scaffoldGoal, true);
+        }
         if (newPath.isEmpty()) {
             deferActiveTarget();
             return;
@@ -431,33 +453,34 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         pathIndex = path.size() > 1 ? 1 : 0;
     }
 
-    private BlockPos findNavigationGoal(BlockPos target) {
+    private BlockPos findNavigationGoal(BlockPos target, boolean allowScaffolding) {
         BlockPos playerPos = mc.player.getBlockPos();
         double deltaX = target.getX() + 0.5 - mc.player.getX();
         double deltaZ = target.getZ() + 0.5 - mc.player.getZ();
         double horizontalDistance = Math.hypot(deltaX, deltaZ);
-        if (horizontalDistance <= pathDistance.get() / 2.0) return findApproachPosition(target);
+        if (horizontalDistance <= pathDistance.get() / 2.0) return findApproachPosition(target, allowScaffolding);
 
         double step = Math.min(pathDistance.get() / 2.0, horizontalDistance);
         int goalX = MathHelper.floor(mc.player.getX() + deltaX / horizontalDistance * step);
         int goalZ = MathHelper.floor(mc.player.getZ() + deltaZ / horizontalDistance * step);
         int goalY = playerPos.getY() + MathHelper.clamp(target.getY() - playerPos.getY(), -1, 1);
-        return findNearestTraversable(new BlockPos(goalX, goalY, goalZ), null);
+        return findNearestTraversable(new BlockPos(goalX, goalY, goalZ), allowScaffolding);
     }
 
-    private BlockPos findApproachPosition(BlockPos target) {
-        int placementRange = Math.max(1, printer.getPlacementRange());
+    private BlockPos findApproachPosition(BlockPos target, boolean allowScaffolding) {
+        double placementRange = printer.getPlacementRange();
+        int searchRadius = Math.max(1, (int) Math.ceil(placementRange));
         BlockPos best = null;
         double bestDistance = Double.MAX_VALUE;
 
         for (int yOffset = -3; yOffset <= 3; yOffset++) {
-            for (int xOffset = -placementRange; xOffset <= placementRange; xOffset++) {
-                for (int zOffset = -placementRange; zOffset <= placementRange; zOffset++) {
+            for (int xOffset = -searchRadius; xOffset <= searchRadius; xOffset++) {
+                for (int zOffset = -searchRadius; zOffset <= searchRadius; zOffset++) {
                     if (xOffset == 0 && yOffset == 0 && zOffset == 0) continue;
                     if (xOffset * xOffset + yOffset * yOffset + zOffset * zOffset > placementRange * placementRange) continue;
 
                     BlockPos candidate = target.add(xOffset, yOffset, zOffset);
-                    if (!isTraversable(candidate, null)) continue;
+                    if (!isTraversable(candidate, allowScaffolding)) continue;
                     double distance = mc.player.squaredDistanceTo(candidate.getX() + 0.5, candidate.getY(), candidate.getZ() + 0.5);
                     if (distance < bestDistance) {
                         best = candidate;
@@ -470,14 +493,14 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         return best;
     }
 
-    private BlockPos findNearestTraversable(BlockPos center, BlockPos from) {
+    private BlockPos findNearestTraversable(BlockPos center, boolean allowScaffolding) {
         for (int radius = 0; radius <= 3; radius++) {
             for (int yOffset = -2; yOffset <= 2; yOffset++) {
                 for (int xOffset = -radius; xOffset <= radius; xOffset++) {
                     for (int zOffset = -radius; zOffset <= radius; zOffset++) {
                         if (Math.max(Math.abs(xOffset), Math.abs(zOffset)) != radius) continue;
                         BlockPos candidate = center.add(xOffset, yOffset, zOffset);
-                        if (isTraversable(candidate, from)) return candidate;
+                        if (isTraversable(candidate, allowScaffolding)) return candidate;
                     }
                 }
             }
@@ -485,7 +508,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         return null;
     }
 
-    private List<BlockPos> findPath(BlockPos start, BlockPos goal, WorldSchematic schematicWorld) {
+    private List<BlockPos> findPath(BlockPos start, BlockPos goal, boolean allowScaffolding) {
         if (start.equals(goal)) return List.of(start);
 
         PriorityQueue<PathNode> open = new PriorityQueue<>(Comparator.comparingInt(PathNode::score));
@@ -504,9 +527,9 @@ public final class AutoPathLitematicaPrinterModule extends Module {
             for (Direction direction : HORIZONTAL_DIRECTIONS) {
                 for (int yOffset = 1; yOffset >= -1; yOffset--) {
                     BlockPos next = node.pos().add(direction.getOffsetX(), yOffset, direction.getOffsetZ());
-                    if (!isInsideSearchArea(start, next) || !isTraversable(next, node.pos())) continue;
+                    if (!isInsideSearchArea(start, next) || !isTraversable(next, allowScaffolding)) continue;
 
-                    int nextCost = node.cost() + 10 + (yOffset > 0 ? 4 : 0) + (needsScaffold(next, schematicWorld) ? 8 : 0);
+                    int nextCost = node.cost() + 10 + (yOffset > 0 ? 4 : 0) + (needsScaffold(next) ? 8 : 0);
                     Integer knownCost = costs.get(next);
                     if (knownCost != null && knownCost <= nextCost) continue;
 
@@ -545,9 +568,9 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         return result;
     }
 
-    private boolean isTraversable(BlockPos pos, BlockPos from) {
+    private boolean isTraversable(BlockPos pos, boolean allowScaffolding) {
         if (isWalkable(pos)) return true;
-        return useScaffolding.get() && isFreeForPlayer(pos) && mc.world.getBlockState(pos.down()).isReplaceable();
+        return allowScaffolding && isFreeForPlayer(pos) && mc.world.getBlockState(pos.down()).isReplaceable();
     }
 
     private boolean isWalkable(BlockPos pos) {
@@ -559,7 +582,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         return mc.world.getBlockState(pos).isReplaceable() && mc.world.getBlockState(pos.up()).isReplaceable();
     }
 
-    private void followPath(WorldSchematic schematicWorld) {
+    private void followPath() {
         if (path.isEmpty() || pathIndex >= path.size()) {
             releaseMovement();
             return;
@@ -571,9 +594,9 @@ public final class AutoPathLitematicaPrinterModule extends Module {
             return;
         }
 
-        if (needsScaffold(next, schematicWorld)) {
+        if (needsScaffold(next)) {
             releaseMovement();
-            ensureScaffold(next.down(), schematicWorld);
+            ensureScaffold(next.down());
             return;
         }
 
@@ -588,14 +611,13 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         return x * x + z * z < 0.16 && Math.abs(pos.getY() - mc.player.getY()) < 1.2;
     }
 
-    private boolean needsScaffold(BlockPos next, WorldSchematic schematicWorld) {
-        return mc.world.getBlockState(next.down()).isReplaceable()
-            && schematicWorld.getBlockState(next.down()).isAir();
+    private boolean needsScaffold(BlockPos next) {
+        return mc.world.getBlockState(next.down()).isReplaceable();
     }
 
-    private void ensureScaffold(BlockPos pos, WorldSchematic schematicWorld) {
+    private void ensureScaffold(BlockPos pos) {
         if (!mc.world.getBlockState(pos).isReplaceable()) return;
-        if (!useScaffolding.get() || !schematicWorld.getBlockState(pos).isAir()) {
+        if (!useScaffolding.get()) {
             deferActiveTarget();
             return;
         }
@@ -616,7 +638,47 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         missingScaffoldReported = false;
         lastScaffoldPos = pos.toImmutable();
         lastScaffoldAttempt = tick;
-        if (!BlockUtils.place(pos, result, true, MOVEMENT_PRIORITY, true)) deferActiveTarget();
+        if (BlockUtils.place(pos, result, true, MOVEMENT_PRIORITY, true)) {
+            temporaryScaffolds.add(pos.toImmutable());
+        } else {
+            deferActiveTarget();
+        }
+    }
+
+    private void cleanupTemporaryScaffolds(WorldSchematic schematicWorld) {
+        if (!removeScaffolding.get() || temporaryScaffolds.isEmpty()) return;
+
+        Iterator<BlockPos> iterator = temporaryScaffolds.iterator();
+        while (iterator.hasNext()) {
+            BlockPos pos = iterator.next();
+            BlockState currentState = mc.world.getBlockState(pos);
+            BlockState requiredState = schematicWorld.getBlockState(pos);
+            if (printer.isProjectionSatisfied(currentState, requiredState)) {
+                iterator.remove();
+                continue;
+            }
+            if (currentState.getBlock() != scaffoldBlock.get()) {
+                iterator.remove();
+                continue;
+            }
+            if (!canSafelyRemoveScaffold(pos)) continue;
+            if (pos.equals(lastCleanupPos) && tick - lastCleanupAttempt < 8) return;
+
+            lastCleanupPos = pos.toImmutable();
+            lastCleanupAttempt = tick;
+            BlockUtils.breakBlock(pos, true);
+            return;
+        }
+    }
+
+    private boolean canSafelyRemoveScaffold(BlockPos pos) {
+        if (!mc.player.getBlockPos().isWithinDistance(pos, printer.getPlacementRange())) return false;
+        if (mc.player.getBoundingBox().intersects(new Box(pos))) return false;
+
+        for (int index = pathIndex; index < path.size(); index++) {
+            if (path.get(index).down().equals(pos)) return false;
+        }
+        return true;
     }
 
     private FindItemResult moveItemToHotbar(Item item) {
