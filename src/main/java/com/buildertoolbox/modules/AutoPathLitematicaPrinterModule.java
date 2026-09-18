@@ -16,17 +16,22 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BlockSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.utils.misc.input.Input;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.render.color.Color;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
@@ -54,6 +59,7 @@ public final class AutoPathLitematicaPrinterModule extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgNavigation = settings.createGroup("Navigation");
     private final SettingGroup sgScaffold = settings.createGroup("Scaffold");
+    private final SettingGroup sgRender = settings.createGroup("Route Render");
 
     private final Setting<Boolean> enablePrinter = sgGeneral.add(new BoolSetting.Builder()
         .name("enable-place-litematica")
@@ -151,6 +157,37 @@ public final class AutoPathLitematicaPrinterModule extends Module {
         .description("Break only scaffolding placed by this module once it no longer supports the route, then print the projection block there.")
         .defaultValue(true)
         .visible(useScaffolding::get)
+        .build()
+    );
+
+    private final Setting<Boolean> renderRoute = sgRender.add(new BoolSetting.Builder()
+        .name("render-route")
+        .description("Render the active target, the planned path, and the next movement node for diagnosing navigation.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<SettingColor> targetColor = sgRender.add(new ColorSetting.Builder()
+        .name("target-color")
+        .description("Color of the active unfinished projection block.")
+        .defaultValue(new SettingColor(255, 190, 0, 90))
+        .visible(renderRoute::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> routeColor = sgRender.add(new ColorSetting.Builder()
+        .name("route-color")
+        .description("Color of the computed A* route and its nodes.")
+        .defaultValue(new SettingColor(40, 170, 255, 210))
+        .visible(renderRoute::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> nextNodeColor = sgRender.add(new ColorSetting.Builder()
+        .name("next-node-color")
+        .description("Color of the next planned standing position.")
+        .defaultValue(new SettingColor(70, 255, 90, 130))
+        .visible(renderRoute::get)
         .build()
     );
 
@@ -787,6 +824,33 @@ public final class AutoPathLitematicaPrinterModule extends Module {
 
     private static String formatPos(BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!renderRoute.get() || mc.player == null) return;
+
+        if (activeTarget != null) {
+            Color color = targetColor.get();
+            event.renderer.box(activeTarget, color, color, ShapeMode.Both, 0);
+        }
+
+        if (path.isEmpty()) return;
+
+        Color route = routeColor.get();
+        Vec3d previous = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        for (int index = 0; index < path.size(); index++) {
+            BlockPos node = path.get(index);
+            Vec3d center = Vec3d.ofCenter(node);
+            event.renderer.line(previous.x, previous.y + 0.1, previous.z, center.x, center.y, center.z, route);
+            event.renderer.box(node, route, route, ShapeMode.Lines, 0);
+            previous = center;
+        }
+
+        if (pathIndex < path.size()) {
+            Color next = nextNodeColor.get();
+            event.renderer.box(path.get(pathIndex), next, next, ShapeMode.Both, 0);
+        }
     }
 
     private record ScanBox(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {}
