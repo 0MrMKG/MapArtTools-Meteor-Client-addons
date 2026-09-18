@@ -4,6 +4,9 @@
   "version": "${version}",
   "name": "Builder Toolbox",
   "description": "Builder Toolbox addon for Meteor Client.",
+  "authors": [
+    "0MrMKG"
+  ],
   "icon": "assets/builder_toolbox/icon.png",
   "environment": "client",
   "entrypoints": {
