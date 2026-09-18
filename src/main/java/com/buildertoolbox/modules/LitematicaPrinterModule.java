@@ -55,7 +55,7 @@ import net.minecraft.world.RaycastContext;
 /** Places missing blocks from the active Litematica projection. */
 public final class LitematicaPrinterModule extends Module {
     private static final int ROTATION_PRIORITY = 50;
-    private static final int ROTATION_DISPATCH_TIMEOUT_TICKS = 10;
+    private static final int ROTATION_DISPATCH_TIMEOUT_TICKS = 40;
     private static final int MAX_BACKOFF_MULTIPLIER = 3;
     private static final double RAYCAST_FACE_EPSILON = 0.01;
 
@@ -135,10 +135,10 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Integer> confirmationTimeout = sgPlacement.add(new IntSetting.Builder()
         .name("server-confirmation-timeout")
-        .description("Ticks to wait for the server's block update before treating a placement as failed.")
-        .defaultValue(10)
-        .range(4, 100)
-        .sliderRange(4, 40)
+        .description("Ticks to wait for the server's exact block-state update before trying another placement plan.")
+        .defaultValue(40)
+        .range(10, 200)
+        .sliderRange(10, 100)
         .build()
     );
 
@@ -158,10 +158,10 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Integer> retryDelay = sgPlacement.add(new IntSetting.Builder()
         .name("retry-delay")
-        .description("Base ticks to wait before retrying a placement that was not confirmed by the server.")
-        .defaultValue(8)
-        .range(2, 100)
-        .sliderRange(2, 40)
+        .description("Base ticks to wait after an unconfirmed placement before trying a different visible support face.")
+        .defaultValue(20)
+        .range(4, 200)
+        .sliderRange(4, 100)
         .visible(retryFailedPlacements::get)
         .build()
     );
@@ -178,10 +178,10 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Integer> recheckDelay = sgPlacement.add(new IntSetting.Builder()
         .name("recheck-delay")
-        .description("Ticks to wait after repeated failures before trying the position again.")
-        .defaultValue(60)
-        .range(20, 600)
-        .sliderRange(20, 200)
+        .description("Ticks to wait after repeated failures before re-evaluating the projection and world state.")
+        .defaultValue(200)
+        .range(40, 1200)
+        .sliderRange(40, 400)
         .visible(retryFailedPlacements::get)
         .build()
     );
@@ -558,6 +558,8 @@ public final class LitematicaPrinterModule extends Module {
             return;
         }
 
+        if (tick - inFlightPlacement.sentAt() < confirmationTimeout.get()) return;
+
         BlockState requiredState = schematicWorld.getBlockState(pos);
         if (requiredState.isAir() || matchesProjection(mc.world.getBlockState(pos), requiredState)) {
             failedPlacements.remove(pos);
@@ -565,9 +567,7 @@ public final class LitematicaPrinterModule extends Module {
             return;
         }
 
-        if (tick - inFlightPlacement.sentAt() >= confirmationTimeout.get()) {
-            markPlacementFailed(pos);
-        }
+        markPlacementFailed(pos);
     }
 
     private void updateRenderStatus(BlockPos pos, BlockState currentState, BlockState requiredState, Map<Block, Boolean> materialAvailability) {
@@ -577,7 +577,6 @@ public final class LitematicaPrinterModule extends Module {
 
         if (matchesProjection(currentState, requiredState)) {
             failedPlacements.remove(pos);
-            if (inFlightPlacement != null && inFlightPlacement.pos().equals(pos)) inFlightPlacement = null;
             renderStatuses.put(pos.toImmutable(), ProjectionStatus.PLACED);
             return;
         }
