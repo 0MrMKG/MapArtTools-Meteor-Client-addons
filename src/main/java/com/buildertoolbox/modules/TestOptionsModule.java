@@ -31,7 +31,28 @@ public final class TestOptionsModule extends Module {
         .build()
     );
 
+    public final Setting<Boolean> test4 = sgGeneral.add(new BoolSetting.Builder()
+        .name("test4")
+        .description("Enable the test4 option.")
+        .defaultValue(false)
+        .build()
+    );
+
+    public final Setting<Boolean> test5 = sgGeneral.add(new BoolSetting.Builder()
+        .name("test5")
+        .description("Enable the test5 option.")
+        .defaultValue(false)
+        .build()
+    );
+
+    public final Setting<Boolean> test6 = sgGeneral.add(new BoolSetting.Builder()
+        .name("test6")
+        .description("Enable the test6 option.")
+        .defaultValue(false)
+        .build()
+    );
+
     public TestOptionsModule() {
-        super(BuilderToolboxAddon.CATEGORY, "test-options", "Contains the test1, test2, and test3 options.");
+        super(BuilderToolboxAddon.CATEGORY, "test-options", "Contains the test1 through test6 options.");
     }
 }
