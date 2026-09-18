@@ -240,6 +240,7 @@ public final class LitematicaPrinterModule extends Module {
     private final Map<BlockPos, ProjectionStatus> nextRenderStatuses = new HashMap<>();
     private final Map<BlockPos, RetryState> failedPlacements = new HashMap<>();
     private InFlightPlacement inFlightPlacement;
+    private int automaticLayerY = Integer.MIN_VALUE;
     private int delayTicks;
     private long tick;
     private boolean missingSchematicReported;
@@ -255,6 +256,7 @@ public final class LitematicaPrinterModule extends Module {
         nextRenderStatuses.clear();
         failedPlacements.clear();
         inFlightPlacement = null;
+        automaticLayerY = Integer.MIN_VALUE;
         delayTicks = 0;
         tick = 0;
         missingSchematicReported = false;
@@ -267,6 +269,7 @@ public final class LitematicaPrinterModule extends Module {
         nextRenderStatuses.clear();
         failedPlacements.clear();
         inFlightPlacement = null;
+        automaticLayerY = Integer.MIN_VALUE;
     }
 
     @EventHandler
@@ -310,7 +313,8 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private boolean isMissingProjectionBlock(BlockPos pos, BlockState currentState, BlockState requiredState) {
-        return canReplaceWithRequiredState(currentState, requiredState)
+        return isWithinAutomaticLayer(pos)
+            && canReplaceWithRequiredState(currentState, requiredState)
             && !requiredState.isAir()
             && requiredState.getFluidState().isEmpty()
             && !matchesProjection(currentState, requiredState)
@@ -610,7 +614,8 @@ public final class LitematicaPrinterModule extends Module {
         Map<Block, Boolean> materialAvailability,
         Map<BlockPos, ProjectionStatus> statuses
     ) {
-        if (requiredState.isAir()
+        if (!isWithinAutomaticLayer(pos)
+            || requiredState.isAir()
             || !mc.player.getBlockPos().isWithinDistance(pos, reach.get())
             || !DataManager.getRenderLayerRange().isPositionWithinRange(pos)) return;
 
@@ -718,6 +723,18 @@ public final class LitematicaPrinterModule extends Module {
 
     public boolean acceptsDirtForGrass() {
         return dirtAsGrass.get();
+    }
+
+    public void setAutomaticLayer(int y) {
+        automaticLayerY = y;
+    }
+
+    public void clearAutomaticLayer() {
+        automaticLayerY = Integer.MIN_VALUE;
+    }
+
+    private boolean isWithinAutomaticLayer(BlockPos pos) {
+        return automaticLayerY == Integer.MIN_VALUE || pos.getY() == automaticLayerY;
     }
 
     private static <T extends Comparable<T>> boolean matchesProperty(BlockState currentState, BlockState requiredState, Property<T> property) {
