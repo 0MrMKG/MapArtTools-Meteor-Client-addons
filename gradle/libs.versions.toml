@@ -7,16 +7,20 @@ yarn-mappings = "1.21.11+build.6"
 fabric-loader = "0.18.2"
 
 # Loom (https://github.com/FabricMC/fabric-loom)
-loom = "1.14-SNAPSHOT"
+loom = "1.15.3"
 
 # Meteor (https://github.com/MeteorDevelopment/meteor-client/)
 meteor = "1.21.11-SNAPSHOT"
+litematica = "1.21.11-0.26.0"
+malilib = "1.21.11-0.27.6"
 
 [libraries]
 minecraft = { module = "com.mojang:minecraft", version.ref = "minecraft" }
 yarn = { module = "net.fabricmc:yarn", version.ref = "yarn-mappings" }
 fabric-loader = { module = "net.fabricmc:fabric-loader", version.ref = "fabric-loader" }
 meteor-client = { module = "meteordevelopment:meteor-client", version.ref = "meteor" }
+litematica = { module = "com.github.sakura-ryoko:litematica", version.ref = "litematica" }
+malilib = { module = "com.github.sakura-ryoko:malilib", version.ref = "malilib" }
 
 [plugins]
 fabric-loom = { id = "fabric-loom", version.ref = "loom" }

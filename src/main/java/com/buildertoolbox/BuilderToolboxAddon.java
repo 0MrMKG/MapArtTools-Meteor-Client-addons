@@ -2,6 +2,7 @@ package com.buildertoolbox;
 
 import com.mojang.logging.LogUtils;
 import com.buildertoolbox.modules.TestOptionsModule;
+import com.buildertoolbox.modules.LitematicaPrinterModule;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -16,6 +17,7 @@ public final class BuilderToolboxAddon extends MeteorAddon {
     public void onInitialize() {
         LOG.info("Initializing Builder Toolbox");
         Modules.get().add(new TestOptionsModule());
+        Modules.get().add(new LitematicaPrinterModule());
     }
 
     @Override

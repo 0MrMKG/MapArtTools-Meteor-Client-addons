@@ -9,6 +9,8 @@ base {
 }
 
 repositories {
+    maven("https://jitpack.io")
+    maven("https://maven.fallenbreath.me/releases")
     maven {
         name = "meteor-maven"
         url = uri("https://maven.meteordev.org/releases")
@@ -24,6 +26,10 @@ dependencies {
     mappings(variantOf(libs.yarn) { classifier("v2") })
     modImplementation(libs.fabric.loader)
     modImplementation(libs.meteor.client)
+    modImplementation(libs.litematica) {
+        exclude(group = "fi.dy.masa.malilib")
+    }
+    modImplementation(libs.malilib)
 }
 
 tasks {
