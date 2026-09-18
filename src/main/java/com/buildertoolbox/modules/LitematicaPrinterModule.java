@@ -42,16 +42,19 @@ import net.minecraft.state.property.Property;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Direction.Axis;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+import net.minecraft.world.RaycastContext;
 
 /** Places missing blocks from the active Litematica projection. */
 public final class LitematicaPrinterModule extends Module {
     private static final int ROTATION_PRIORITY = 50;
-    private static final int PLACEMENT_CONFIRMATION_TICKS = 4;
+    private static final int ROTATION_DISPATCH_TIMEOUT_TICKS = 5;
     private static final int MAX_BACKOFF_MULTIPLIER = 3;
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -79,7 +82,7 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Setting<Integer> blocksPerTick = sgGeneral.add(new IntSetting.Builder()
         .name("blocks-per-tick")
-        .description("Maximum number of projection blocks to place per pass.")
+        .description("Maximum placements per pass. Server confirmation keeps one placement request in flight.")
         .defaultValue(1)
         .range(1, 20)
         .sliderRange(1, 10)
@@ -124,6 +127,22 @@ public final class LitematicaPrinterModule extends Module {
     private final Setting<Boolean> stateAwarePlacement = sgPlacement.add(new BoolSetting.Builder()
         .name("state-aware-placement")
         .description("Use the projection's orientation, axis, and top or bottom placement state when placing blocks.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> confirmationTimeout = sgPlacement.add(new IntSetting.Builder()
+        .name("server-confirmation-timeout")
+        .description("Ticks to wait for the server's block update before treating a placement as failed.")
+        .defaultValue(20)
+        .range(6, 100)
+        .sliderRange(6, 40)
+        .build()
+    );
+
+    private final Setting<Boolean> sneakOnInteractable = sgPlacement.add(new BoolSetting.Builder()
+        .name("sneak-on-interactable")
+        .description("Temporarily sneak when clicking an interactable support block, such as a chest or crafting table.")
         .defaultValue(true)
         .build()
     );
@@ -212,8 +231,8 @@ public final class LitematicaPrinterModule extends Module {
 
     private final List<BlockPos> candidates = new ArrayList<>();
     private final Map<BlockPos, ProjectionStatus> renderStatuses = new HashMap<>();
-    private final Map<BlockPos, Long> pendingPlacements = new HashMap<>();
     private final Map<BlockPos, RetryState> failedPlacements = new HashMap<>();
+    private InFlightPlacement inFlightPlacement;
     private int delayTicks;
     private long tick;
     private boolean missingSchematicReported;
@@ -226,8 +245,8 @@ public final class LitematicaPrinterModule extends Module {
     public void onActivate() {
         candidates.clear();
         renderStatuses.clear();
-        pendingPlacements.clear();
         failedPlacements.clear();
+        inFlightPlacement = null;
         delayTicks = 0;
         tick = 0;
         missingSchematicReported = false;
@@ -237,8 +256,8 @@ public final class LitematicaPrinterModule extends Module {
     public void onDeactivate() {
         candidates.clear();
         renderStatuses.clear();
-        pendingPlacements.clear();
         failedPlacements.clear();
+        inFlightPlacement = null;
     }
 
     @EventHandler
@@ -249,8 +268,8 @@ public final class LitematicaPrinterModule extends Module {
         WorldSchematic schematicWorld = SchematicWorldHandler.getSchematicWorld();
         if (schematicWorld == null) {
             renderStatuses.clear();
-            pendingPlacements.clear();
             failedPlacements.clear();
+            inFlightPlacement = null;
             if (!missingSchematicReported) {
                 warning("Load a Litematica schematic before enabling the printer.");
                 missingSchematicReported = true;
@@ -259,7 +278,7 @@ public final class LitematicaPrinterModule extends Module {
         }
 
         missingSchematicReported = false;
-        settlePendingPlacements(schematicWorld);
+        settleInFlightPlacement(schematicWorld);
         if (delayTicks++ < delay.get()) return;
         delayTicks = 0;
 
@@ -287,12 +306,12 @@ public final class LitematicaPrinterModule extends Module {
             && DataManager.getRenderLayerRange().isPositionWithinRange(pos)
             && requiredState.canPlaceAt(mc.world, pos)
             && hasRequiredItem(requiredState)
-            && !pendingPlacements.containsKey(pos)
+            && inFlightPlacement == null
             && canRetry(pos);
     }
 
     private void placeCandidates(WorldSchematic schematicWorld) {
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null || mc.world == null || inFlightPlacement != null) return;
 
         sortCandidates();
 
@@ -304,6 +323,8 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private boolean placeBlock(BlockPos pos, BlockState requiredState) {
+        if (inFlightPlacement != null) return false;
+
         BlockState currentState = mc.world.getBlockState(pos);
         if (!canReplaceWithRequiredState(currentState, requiredState)) {
             markPlacementFailed(pos);
@@ -318,11 +339,10 @@ public final class LitematicaPrinterModule extends Module {
             return false;
         }
 
-        boolean placed = stateAwarePlacement.get()
-            ? placeStateAware(pos, currentState, requiredState, item)
-            : BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
+        if (stateAwarePlacement.get()) return placeStateAware(pos, currentState, requiredState, item);
 
-        if (placed) pendingPlacements.put(pos.toImmutable(), tick);
+        boolean placed = BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
+        if (placed) beginWaitingForConfirmation(pos, getSupportVariant(pos));
         else markPlacementFailed(pos);
         return placed;
     }
@@ -356,17 +376,29 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private boolean placeStateAware(BlockPos pos, BlockState currentState, BlockState requiredState, FindItemResult item) {
-        PlacementPlan plan = createPlacementPlan(pos, currentState, requiredState, getSupportVariant(pos));
-        if (plan == null) return BlockUtils.place(pos, item, rotate.get(), ROTATION_PRIORITY, swing.get());
+        int supportVariant = getSupportVariant(pos);
+        PlacementPlan plan = createPlacementPlan(pos, currentState, requiredState, supportVariant);
+        if (plan == null) {
+            markPlacementFailed(pos);
+            return false;
+        }
+
+        inFlightPlacement = new InFlightPlacement(pos.toImmutable(), supportVariant, tick, -1, PlacementPhase.SCHEDULED);
 
         Runnable interact = () -> {
+            if (!isCurrentScheduledPlacement(pos, supportVariant)) return;
+
             if (!InvUtils.swap(item.slot(), true)) {
                 markPlacementFailed(pos);
                 return;
             }
 
+            boolean sneaking = shouldSneakFor(plan);
+            if (sneaking) setSneaking(true);
             BlockUtils.interact(plan.hitResult(), Hand.MAIN_HAND, swing.get());
+            if (sneaking) setSneaking(false);
             InvUtils.swapBack();
+            beginWaitingForConfirmation(pos, supportVariant);
         };
 
         if (rotate.get()) {
@@ -383,20 +415,26 @@ public final class LitematicaPrinterModule extends Module {
     private PlacementPlan createPlacementPlan(BlockPos pos, BlockState currentState, BlockState requiredState, int supportVariant) {
         if (canMergeSlab(currentState, requiredState)) {
             Vec3d hitPos = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.75, pos.getZ() + 0.5);
-            return new PlacementPlan(new BlockHitResult(hitPos, Direction.UP, pos, false), hitPos);
+            PlacementPlan plan = new PlacementPlan(new BlockHitResult(hitPos, Direction.UP, pos, false), hitPos);
+            return isInteractionVisible(plan) ? plan : null;
         }
 
-        Direction supportDirection = findSupportDirection(pos, requiredState, supportVariant);
-        if (supportDirection == null) return null;
+        List<Direction> validSupports = findSupportDirections(pos, requiredState);
+        for (int offset = 0; offset < validSupports.size(); offset++) {
+            Direction supportDirection = validSupports.get(Math.floorMod(supportVariant + offset, validSupports.size()));
+            BlockPos supportPos = pos.offset(supportDirection);
+            Direction clickedFace = supportDirection.getOpposite();
+            Vec3d hitPos = getFaceCenter(supportPos, clickedFace);
+            hitPos = adjustHitPositionForState(hitPos, pos, clickedFace, requiredState);
 
-        BlockPos supportPos = pos.offset(supportDirection);
-        Direction clickedFace = supportDirection.getOpposite();
-        Vec3d hitPos = getFaceCenter(supportPos, clickedFace);
-        hitPos = adjustHitPositionForState(hitPos, pos, clickedFace, requiredState);
-        return new PlacementPlan(new BlockHitResult(hitPos, clickedFace, supportPos, false), hitPos);
+            PlacementPlan plan = new PlacementPlan(new BlockHitResult(hitPos, clickedFace, supportPos, false), hitPos);
+            if (isInteractionVisible(plan)) return plan;
+        }
+
+        return null;
     }
 
-    private Direction findSupportDirection(BlockPos pos, BlockState requiredState, int supportVariant) {
+    private List<Direction> findSupportDirections(BlockPos pos, BlockState requiredState) {
         List<Direction> directions = new ArrayList<>();
 
         if (requiredState.contains(Properties.AXIS)) addAxisDirections(directions, requiredState.get(Properties.AXIS));
@@ -417,7 +455,35 @@ public final class LitematicaPrinterModule extends Module {
             if (!mc.world.getBlockState(pos.offset(direction)).isReplaceable()) validSupports.add(direction);
         }
 
-        return validSupports.isEmpty() ? null : validSupports.get(Math.floorMod(supportVariant, validSupports.size()));
+        return validSupports;
+    }
+
+    private boolean isInteractionVisible(PlacementPlan plan) {
+        HitResult raycast = mc.world.raycast(new RaycastContext(
+            mc.player.getEyePos(),
+            plan.hitResult().getPos(),
+            RaycastContext.ShapeType.COLLIDER,
+            RaycastContext.FluidHandling.NONE,
+            mc.player
+        ));
+
+        return raycast.getType() == HitResult.Type.BLOCK
+            && raycast instanceof BlockHitResult hit
+            && hit.getBlockPos().equals(plan.hitResult().getBlockPos())
+            && hit.getSide() == plan.hitResult().getSide();
+    }
+
+    private boolean shouldSneakFor(PlacementPlan plan) {
+        return sneakOnInteractable.get()
+            && !mc.player.isSneaking()
+            && BlockUtils.isClickable(mc.world.getBlockState(plan.hitResult().getBlockPos()).getBlock());
+    }
+
+    private void setSneaking(boolean sneaking) {
+        ClientCommandC2SPacket.Mode mode = sneaking
+            ? ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY
+            : ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY;
+        mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, mode));
     }
 
     private static void addAxisDirections(List<Direction> directions, Axis axis) {
@@ -474,25 +540,27 @@ public final class LitematicaPrinterModule extends Module {
         };
     }
 
-    private void settlePendingPlacements(WorldSchematic schematicWorld) {
-        List<BlockPos> confirmed = new ArrayList<>();
-        List<BlockPos> failed = new ArrayList<>();
+    private void settleInFlightPlacement(WorldSchematic schematicWorld) {
+        if (inFlightPlacement == null) return;
 
-        for (Map.Entry<BlockPos, Long> entry : pendingPlacements.entrySet()) {
-            BlockPos pos = entry.getKey();
-            BlockState requiredState = schematicWorld.getBlockState(pos);
-            if (requiredState.isAir() || matchesProjection(mc.world.getBlockState(pos), requiredState)) {
-                confirmed.add(pos);
-                continue;
+        BlockPos pos = inFlightPlacement.pos();
+        if (inFlightPlacement.phase() == PlacementPhase.SCHEDULED) {
+            if (tick - inFlightPlacement.scheduledAt() >= ROTATION_DISPATCH_TIMEOUT_TICKS) {
+                markPlacementFailed(pos);
             }
-
-            if (tick - entry.getValue() >= PLACEMENT_CONFIRMATION_TICKS) {
-                failed.add(pos);
-            }
+            return;
         }
 
-        confirmed.forEach(pendingPlacements::remove);
-        failed.forEach(this::markPlacementFailed);
+        BlockState requiredState = schematicWorld.getBlockState(pos);
+        if (requiredState.isAir() || matchesProjection(mc.world.getBlockState(pos), requiredState)) {
+            failedPlacements.remove(pos);
+            inFlightPlacement = null;
+            return;
+        }
+
+        if (tick - inFlightPlacement.sentAt() >= confirmationTimeout.get()) {
+            markPlacementFailed(pos);
+        }
     }
 
     private void updateRenderStatus(BlockPos pos, BlockState currentState, BlockState requiredState, Map<Block, Boolean> materialAvailability) {
@@ -501,8 +569,8 @@ public final class LitematicaPrinterModule extends Module {
             || !DataManager.getRenderLayerRange().isPositionWithinRange(pos)) return;
 
         if (matchesProjection(currentState, requiredState)) {
-            pendingPlacements.remove(pos);
             failedPlacements.remove(pos);
+            if (inFlightPlacement != null && inFlightPlacement.pos().equals(pos)) inFlightPlacement = null;
             renderStatuses.put(pos.toImmutable(), ProjectionStatus.PLACED);
             return;
         }
@@ -517,7 +585,7 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private void markPlacementFailed(BlockPos pos) {
-        pendingPlacements.remove(pos);
+        if (inFlightPlacement != null && inFlightPlacement.pos().equals(pos)) inFlightPlacement = null;
         BlockPos key = pos.toImmutable();
         if (!retryFailedPlacements.get()) {
             failedPlacements.put(key, new RetryState(0, 0, Long.MAX_VALUE));
@@ -546,6 +614,24 @@ public final class LitematicaPrinterModule extends Module {
     private int getSupportVariant(BlockPos pos) {
         RetryState retry = failedPlacements.get(pos);
         return retry == null ? 0 : retry.supportVariant();
+    }
+
+    private boolean isCurrentScheduledPlacement(BlockPos pos, int supportVariant) {
+        return inFlightPlacement != null
+            && inFlightPlacement.phase() == PlacementPhase.SCHEDULED
+            && inFlightPlacement.pos().equals(pos)
+            && inFlightPlacement.supportVariant() == supportVariant;
+    }
+
+    private void beginWaitingForConfirmation(BlockPos pos, int supportVariant) {
+        if (inFlightPlacement == null) {
+            inFlightPlacement = new InFlightPlacement(pos.toImmutable(), supportVariant, tick, tick, PlacementPhase.WAITING_FOR_SERVER);
+            return;
+        }
+
+        if (inFlightPlacement.pos().equals(pos)) {
+            inFlightPlacement = new InFlightPlacement(pos.toImmutable(), supportVariant, inFlightPlacement.scheduledAt(), tick, PlacementPhase.WAITING_FOR_SERVER);
+        }
     }
 
     private static boolean canReplaceWithRequiredState(BlockState currentState, BlockState requiredState) {
@@ -617,7 +703,14 @@ public final class LitematicaPrinterModule extends Module {
 
     private record PlacementPlan(BlockHitResult hitResult, Vec3d rotationTarget) {}
 
+    private record InFlightPlacement(BlockPos pos, int supportVariant, long scheduledAt, long sentAt, PlacementPhase phase) {}
+
     private record RetryState(int consecutiveFailures, int supportVariant, long nextRetryTick) {}
+
+    private enum PlacementPhase {
+        SCHEDULED,
+        WAITING_FOR_SERVER
+    }
 
     private enum ProjectionStatus {
         READY,
