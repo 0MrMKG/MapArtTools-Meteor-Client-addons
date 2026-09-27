@@ -1,8 +1,8 @@
 package com.buildertoolbox;
 
 import com.mojang.logging.LogUtils;
-import com.buildertoolbox.modules.AutoPathLitematicaPrinterModule;
 import com.buildertoolbox.modules.LitematicaPrinterModule;
+import com.buildertoolbox.modules.LitematicaMapArtModule;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -17,7 +17,7 @@ public final class BuilderToolboxAddon extends MeteorAddon {
     public void onInitialize() {
         LOG.info("Initializing Builder Toolbox");
         Modules.get().add(new LitematicaPrinterModule());
-        Modules.get().add(new AutoPathLitematicaPrinterModule());
+        Modules.get().add(new LitematicaMapArtModule());
     }
 
     @Override
