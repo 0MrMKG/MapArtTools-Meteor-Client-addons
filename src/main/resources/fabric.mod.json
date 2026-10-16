@@ -9,6 +9,7 @@
   ],
   "icon": "assets/builder_toolbox/icon.png",
   "environment": "client",
+  "mixins": ["builder_toolbox.mixins.json"],
   "entrypoints": {
     "meteor": [
       "com.buildertoolbox.BuilderToolboxAddon"

@@ -197,6 +197,7 @@ public final class LitematicaPrinterModule extends Module {
     private final Map<BlockPos, Integer> placementCooldowns = new HashMap<>();
     private final Map<BlockPos, Long> normalPendingPlacements = new HashMap<>();
     private final Set<BlockPos> cancelledPlacements = new HashSet<>();
+    private final Map<BlockPos, Object> queuedProjectionPlacements = new HashMap<>();
     private final List<FadeEntry> fadeEntries = new ArrayList<>();
     private final List<PreparedPlacement> preparedPlacements = new ArrayList<>();
     private int scanCursor;
@@ -226,6 +227,7 @@ public final class LitematicaPrinterModule extends Module {
 
     private void resetRuntime() {
         placementCooldowns.clear();
+        for (BlockPos pos : normalPendingPlacements.keySet()) cancelQueuedProjectionPlacement(pos);
         normalPendingPlacements.clear();
         cancelledPlacements.clear();
         fadeEntries.clear();
@@ -631,15 +633,28 @@ public final class LitematicaPrinterModule extends Module {
         if (mc.player.getInventory().getSelectedSlot() != slot.slot()) InvUtils.swap(slot.slot(), false);
         cancelledPlacements.remove(pos);
         PlacementRotation rotation = getXiaohePlacementRotation(plan, requiredState);
-        Rotations.rotate(rotation.yaw(), rotation.pitch(), ROTATION_PRIORITY, () ->
-            interactWithSupportSneak(plan, pos, item, true)
-        );
+        BlockPos immutablePos = pos.toImmutable();
+        Object token = new Object();
+        queuedProjectionPlacements.put(immutablePos, token);
+        Rotations.rotate(rotation.yaw(), rotation.pitch(), ROTATION_PRIORITY, () -> {
+            if (queuedProjectionPlacements.get(immutablePos) != token) return;
+            queuedProjectionPlacements.remove(immutablePos);
+            interactWithSupportSneak(plan, immutablePos, item, true);
+        });
         mc.player.networkHandler.sendPacket(new CloseHandledScreenC2SPacket(mc.player.currentScreenHandler.syncId));
         return ExternalPlacementResult.DISPATCHED;
     }
 
     public boolean consumeCancelledPlacement(BlockPos pos) {
         return cancelledPlacements.remove(pos);
+    }
+
+    public boolean hasQueuedProjectionPlacement() {
+        return !queuedProjectionPlacements.isEmpty();
+    }
+
+    public void cancelQueuedProjectionPlacement(BlockPos pos) {
+        queuedProjectionPlacements.remove(pos);
     }
 
     private void interactWithSupportSneak(PlacementPlan plan, BlockPos targetPos, Item expectedItem, boolean trackCancellation) {
