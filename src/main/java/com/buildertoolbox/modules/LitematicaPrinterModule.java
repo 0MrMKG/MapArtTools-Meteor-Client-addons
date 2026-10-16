@@ -7,8 +7,10 @@ import fi.dy.masa.litematica.world.WorldSchematic;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -194,6 +196,7 @@ public final class LitematicaPrinterModule extends Module {
 
     private final Map<BlockPos, Integer> placementCooldowns = new HashMap<>();
     private final Map<BlockPos, Long> normalPendingPlacements = new HashMap<>();
+    private final Set<BlockPos> cancelledPlacements = new HashSet<>();
     private final List<FadeEntry> fadeEntries = new ArrayList<>();
     private final List<PreparedPlacement> preparedPlacements = new ArrayList<>();
     private int scanCursor;
@@ -224,6 +227,7 @@ public final class LitematicaPrinterModule extends Module {
     private void resetRuntime() {
         placementCooldowns.clear();
         normalPendingPlacements.clear();
+        cancelledPlacements.clear();
         fadeEntries.clear();
         preparedPlacements.clear();
         scanCursor = 0;
@@ -282,6 +286,7 @@ public final class LitematicaPrinterModule extends Module {
         }
         missingSchematicReported = false;
         normalPendingPlacements.entrySet().removeIf(entry -> {
+            if (consumeCancelledPlacement(entry.getKey())) return true;
             BlockState required = schematicWorld.getBlockState(entry.getKey());
             if (mc.world.getBlockState(entry.getKey()).equals(required)) return true;
             if (normalTick - entry.getValue() < 20) return false;
@@ -580,7 +585,7 @@ public final class LitematicaPrinterModule extends Module {
 
             PlacementRotation rotation = getXiaohePlacementRotation(plan, placement.requiredState());
             Rotations.rotate(rotation.yaw(), rotation.pitch(), ROTATION_PRIORITY, () ->
-                interactWithSupportSneak(plan)
+                interactWithSupportSneak(plan, pos, placement.item(), false)
             );
 
             fadeEntries.add(new FadeEntry(renderFadeTicks.get(), pos.toImmutable()));
@@ -624,20 +629,37 @@ public final class LitematicaPrinterModule extends Module {
         if (plan == null) return ExternalPlacementResult.BLOCKED;
 
         if (mc.player.getInventory().getSelectedSlot() != slot.slot()) InvUtils.swap(slot.slot(), false);
+        cancelledPlacements.remove(pos);
         PlacementRotation rotation = getXiaohePlacementRotation(plan, requiredState);
         Rotations.rotate(rotation.yaw(), rotation.pitch(), ROTATION_PRIORITY, () ->
-            interactWithSupportSneak(plan)
+            interactWithSupportSneak(plan, pos, item, true)
         );
         mc.player.networkHandler.sendPacket(new CloseHandledScreenC2SPacket(mc.player.currentScreenHandler.syncId));
         return ExternalPlacementResult.DISPATCHED;
     }
 
-    private void interactWithSupportSneak(PlacementPlan plan) {
-        if (mc.player == null || mc.world == null) return;
+    public boolean consumeCancelledPlacement(BlockPos pos) {
+        return cancelledPlacements.remove(pos);
+    }
+
+    private void interactWithSupportSneak(PlacementPlan plan, BlockPos targetPos, Item expectedItem, boolean trackCancellation) {
+        if (mc.player == null || mc.world == null) {
+            if (trackCancellation) cancelledPlacements.add(targetPos.toImmutable());
+            return;
+        }
+        // Rotation callbacks may run after an inventory change. Never click a
+        // container with an empty or wrong hand; let the caller retry instead.
+        if (!mc.player.getMainHandStack().isOf(expectedItem)) {
+            if (trackCancellation) cancelledPlacements.add(targetPos.toImmutable());
+            return;
+        }
         BlockPos supportPos = plan.hitResult().getBlockPos();
         boolean clickableSupport = BlockUtils.isClickable(mc.world.getBlockState(supportPos).getBlock());
         boolean temporarySneak = clickableSupport && !mc.player.isSneaking();
-        if (temporarySneak) {
+        if (clickableSupport) {
+            // A dispenser is already covered by BlockWithEntity in Meteor's
+            // clickable list. Resend sneak for every such click: local sneak
+            // state can be ahead of the server after movement or rotation.
             mc.player.setSneaking(true);
             sendSneaking(true);
         }
