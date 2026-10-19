@@ -3,10 +3,11 @@ package com.buildertoolbox;
 import com.mojang.logging.LogUtils;
 import com.buildertoolbox.modules.LitematicaPrinterModule;
 import com.buildertoolbox.modules.LitematicaMapArtModule;
-import com.buildertoolbox.modules.CarpetCollectorModule;
+import com.buildertoolbox.modules.FullAutoMapArtModule;
+import com.buildertoolbox.fullauto.MapArtModeGuard;
 import com.buildertoolbox.modules.ChestOrganizerModule;
-import com.buildertoolbox.modules.GroundItemSorterModule;
 import com.buildertoolbox.modules.UnderfootScaffoldModule;
+import com.buildertoolbox.modules.AutoCraftModule;
 import java.lang.reflect.Field;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
@@ -26,12 +27,13 @@ public final class BuilderToolboxAddon extends MeteorAddon {
         setMenuTitle(printer, "Schematic Printer");
         Modules.get().add(printer);
         Modules.get().add(new LitematicaMapArtModule());
-        CarpetCollectorModule collector = new CarpetCollectorModule();
-        setMenuTitle(collector, "Map Art Carpet Collector");
-        Modules.get().add(collector);
+        FullAutoMapArtModule fullAuto = new FullAutoMapArtModule();
+        setMenuTitle(fullAuto, "map-artmaker-all-auto");
+        Modules.get().add(fullAuto);
         Modules.get().add(new ChestOrganizerModule());
-        Modules.get().add(new GroundItemSorterModule());
         Modules.get().add(new UnderfootScaffoldModule());
+        Modules.get().add(new AutoCraftModule());
+        MapArtModeGuard.install();
     }
 
     private static void setMenuTitle(Module module, String title) {

@@ -2,7 +2,10 @@ package com.buildertoolbox.modules;
 
 import com.buildertoolbox.BuilderToolboxAddon;
 import com.buildertoolbox.utils.MapArtBandGeometry;
+import com.buildertoolbox.utils.InventoryMergePlanner;
+import com.buildertoolbox.utils.GroundPathVisibility;
 import com.buildertoolbox.utils.MapArtSupplyPlanner;
+import com.buildertoolbox.utils.MapArtColorFilter;
 import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import fi.dy.masa.litematica.schematic.placement.SubRegionPlacement;
@@ -27,6 +30,14 @@ import meteordevelopment.meteorclient.events.meteor.KeyEvent;
 import meteordevelopment.meteorclient.events.meteor.MouseClickEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.gui.GuiThemes;
+import meteordevelopment.meteorclient.gui.GuiTheme;
+import meteordevelopment.meteorclient.gui.renderer.GuiRenderer;
+import meteordevelopment.meteorclient.gui.widgets.WWidget;
+import meteordevelopment.meteorclient.gui.widgets.WLabel;
+import meteordevelopment.meteorclient.gui.widgets.containers.WSection;
+import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
+import meteordevelopment.meteorclient.gui.widgets.containers.WHorizontalList;
+import meteordevelopment.meteorclient.gui.widgets.pressable.WCheckbox;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
@@ -56,11 +67,13 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.screen.Generic3x3ContainerScreenHandler;
 import net.minecraft.client.gui.screen.ingame.Generic3x3ContainerScreen;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.util.Hand;
+import net.minecraft.util.DyeColor;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -91,6 +104,26 @@ public final class LitematicaMapArtModule extends Module {
     private final SettingGroup sgSupply = settings.createGroup("Supplies");
     private final SettingGroup sgNavigation = settings.createGroup("Navigation");
 
+    // Persist through Meteor profiles, but present these in the color table
+    // instead of exposing a raw editable list of color IDs.
+    private final Setting<Boolean> colorFilterEnabled = sgGeneral.add(new BoolSetting.Builder()
+        .name("Color Filter Enabled")
+        .description("Enable the color exclusion table below. Checked colors are not placed or restocked.")
+        .defaultValue(false)
+        .visible(() -> false)
+        .onChanged(value -> queueWorkPlanUpdate())
+        .build()
+    );
+
+    private final Setting<List<String>> excludedColors = sgGeneral.add(new StringListSetting.Builder()
+        .name("Excluded Colors")
+        .description("Saved dye color IDs selected in the color exclusion table.")
+        .defaultValue(new String[0])
+        .visible(() -> false)
+        .onChanged(value -> { if (colorFilterEnabled.get()) queueWorkPlanUpdate(); })
+        .build()
+    );
+
     private final Setting<Boolean> registerSupply = sgSupply.add(new BoolSetting.Builder()
         .name("Select Supply Chests")
         .description("Hides the settings screen: right-click a labeled container to add it, press Esc to return here.")
@@ -120,6 +153,14 @@ public final class LitematicaMapArtModule extends Module {
         .defaultValue(4)
         .range(1, 16)
         .sliderRange(1, 8)
+        .build()
+    );
+
+    private final Setting<Boolean> reverseSnake = sgGeneral.add(new BoolSetting.Builder()
+        .name("Reverse Snake")
+        .description("Start at the other end of the normal snake route and traverse it backwards. For two players starting on the same side, enable this for one player. Restocking follows the selected direction.")
+        .defaultValue(false)
+        .onChanged(value -> queueWorkPlanUpdate())
         .build()
     );
 
@@ -185,6 +226,9 @@ public final class LitematicaMapArtModule extends Module {
     );
 
     private final List<ProjectionTarget> targets = new ArrayList<>();
+    private final List<ProjectionTarget> projectionLayer = new ArrayList<>();
+    private boolean workPlanDirty;
+    private int excludedProjectionCells;
     private final Map<Item, List<BlockPos>> supplies = new HashMap<>();
     private final Set<BlockPos> blockedTargets = new HashSet<>();
     // The authoritative completion matrix. A cell changes to true only after
@@ -237,6 +281,12 @@ public final class LitematicaMapArtModule extends Module {
     private boolean returningFromRestock;
     private int returnWorkLane = -1;
     private int supplyCheckedLane = -1;
+    private ProjectionTarget pendingRestockTarget;
+    private InventoryMergePlanner.Merge pendingInventoryMerge;
+    private ItemStack mergeItem = ItemStack.EMPTY;
+    private long mergeWaitUntil;
+    private int mergeOperations;
+    private int slotsBeforeMerge;
     private int pathIndex;
     private int pathAttempts;
     private int restockInventoryBefore;
@@ -249,7 +299,6 @@ public final class LitematicaMapArtModule extends Module {
     private int supplyOpenSyncId = -1;
     private int snakeWaypointIndex;
     private boolean snakeSweepCompleted;
-    private boolean snakeCleanupMode;
     private int snakeSkippedWaypoints;
     // The module may only clear a key state it set itself. This keeps idle
     // states, menus and chest registration from cancelling manual movement.
@@ -274,6 +323,68 @@ public final class LitematicaMapArtModule extends Module {
 
     public LitematicaMapArtModule() {
         super(BuilderToolboxAddon.CATEGORY, "Map Art Maker", "Builds the current Litematica layer in serpentine bands and restocks from labeled containers. It never toggles Schematic Printer.");
+    }
+
+    @Override
+    public WWidget getWidget(GuiTheme theme) {
+        WSection section = theme.section("Color Filter - checked colors are skipped", true);
+        WHorizontalList controls = section.add(theme.horizontalList()).expandX().widget();
+        controls.add(theme.label("Enable Color Filter"));
+        WCheckbox enabled = controls.add(theme.checkbox(colorFilterEnabled.get())).widget();
+        WLabel status = section.add(theme.label(colorFilterStatus())).widget();
+        enabled.action = () -> {
+            colorFilterEnabled.set(enabled.checked);
+            status.set(colorFilterStatus());
+        };
+        enabled.tooltip = "Off by default. Color selections are saved even when filtering is disabled.";
+        WTable table = section.add(theme.table()).expandX().widget();
+        table.horizontalSpacing = 12;
+        for (int panel = 0; panel < 2; panel++) {
+            table.add(theme.label("Swatch"));
+            table.add(theme.label("Color"));
+            table.add(theme.label("Skip"));
+        }
+        table.row();
+        DyeColor[] colors = DyeColor.values();
+        for (int row = 0; row < 8; row++) {
+            for (int panel = 0; panel < 2; panel++) {
+                DyeColor color = colors[row + panel * 8];
+                String id = color.getId();
+                ColorSwatch swatch = new ColorSwatch(color);
+                swatch.theme = theme;
+                table.add(swatch);
+                String label = java.util.Arrays.stream(id.split("_"))
+                    .map(word -> Character.toUpperCase(word.charAt(0)) + word.substring(1))
+                    .collect(java.util.stream.Collectors.joining(" "));
+                table.add(theme.label(label));
+                WCheckbox skip = table.add(theme.checkbox(excludedColors.get().contains(id))).widget();
+                skip.tooltip = "Checked = skip " + label + " dyed blocks; does not remove existing blocks.";
+                skip.action = () -> {
+                    List<String> selected = new ArrayList<>(excludedColors.get());
+                    selected.removeIf(id::equals);
+                    if (skip.checked) selected.add(id);
+                    excludedColors.set(selected);
+                    status.set(colorFilterStatus());
+                };
+            }
+            table.row();
+        }
+        section.add(theme.label("Applies to dyed blocks, not all blocks with a similar map color."));
+        return section;
+    }
+
+    private String colorFilterStatus() {
+        return colorFilterEnabled.get() ? "Enabled: " + excludedColors.get().size() + " color(s) excluded"
+            : "Disabled: all colors will be printed (selections saved)";
+    }
+
+    private void queueWorkPlanUpdate() {
+        if (isActive()) workPlanDirty = true;
+    }
+
+    private boolean isExcludedColor(BlockState blockState) {
+        Identifier id = Registries.BLOCK.getId(blockState.getBlock());
+        return MapArtColorFilter.excludes(colorFilterEnabled.get(), excludedColors.get(), id.getNamespace(), id.getPath());
     }
 
     @Override
@@ -312,7 +423,7 @@ public final class LitematicaMapArtModule extends Module {
             return;
         }
         if (remainingTargets.isEmpty()) {
-            info("Map Art: all %d cells already match the projection.", targets.size());
+            info("Map Art: all %d included cells already match; %d cells excluded by color.", targets.size(), excludedProjectionCells);
             disable();
             return;
         }
@@ -330,6 +441,7 @@ public final class LitematicaMapArtModule extends Module {
         activity = "开始蛇形打印";
         info("Map Art resumed: %d already complete, %d remaining, %d material types.",
             completedMatrixCells(), remainingTargets.size(), supplies.size());
+        if (excludedProjectionCells > 0) info("颜色筛选：跳过 %d 格，不计入铺设、补货或完成数量。", excludedProjectionCells);
         info("Working line spacing: %d blocks (%s).", workingBandWidth,
             autoBandWidth.get() ? "automatic safe maximum" : "manual, reach-limited");
     }
@@ -393,6 +505,11 @@ public final class LitematicaMapArtModule extends Module {
         }
         tick++;
 
+        if (workPlanDirty && state != TaskState.REGISTERING && state != TaskState.IDLE && !projectionLayer.isEmpty()) {
+            applyWorkPlanUpdate();
+            return;
+        }
+
         if (state == TaskState.WORK && mc.currentScreen instanceof Generic3x3ContainerScreen
             && mc.player.currentScreenHandler instanceof Generic3x3ContainerScreenHandler) {
             mc.player.closeHandledScreen();
@@ -402,6 +519,7 @@ public final class LitematicaMapArtModule extends Module {
         }
         switch (state) {
             case WORK -> tickWork();
+            case COMPACT_INVENTORY -> tickInventoryCompaction();
             case RESTOCK -> tickRestock();
             case VERIFY -> tickVerify();
             case WAITING_SUPPLY_RECHECK -> tickSupplyRecheckWait();
@@ -706,20 +824,38 @@ public final class LitematicaMapArtModule extends Module {
         maxX = Integer.MIN_VALUE;
         minZ = Integer.MAX_VALUE;
         maxZ = Integer.MIN_VALUE;
-        targets.clear();
-        placementMatrix.clear();
-        targetIndices.clear();
-        remainingTargets.clear();
-        dispatchedPlacements.clear();
+        projectionLayer.clear();
         for (BlockPos pos : positions) {
             BlockState required = schematic.getBlockState(pos);
             minX = Math.min(minX, pos.getX());
             maxX = Math.max(maxX, pos.getX());
             minZ = Math.min(minZ, pos.getZ());
             maxZ = Math.max(maxZ, pos.getZ());
-            targets.add(new ProjectionTarget(pos.toImmutable(), required, 0));
-            placementMatrix.put(pos.toImmutable(), false);
+            projectionLayer.add(new ProjectionTarget(pos.toImmutable(), required, 0));
         }
+        rebuildFilteredMatrix();
+        return true;
+    }
+
+    private void rebuildFilteredMatrix() {
+        cancelQueuedPlacements();
+        targets.clear();
+        placementMatrix.clear();
+        targetIndices.clear();
+        remainingTargets.clear();
+        dispatchedPlacements.clear();
+        blockedTargets.clear();
+        excludedProjectionCells = 0;
+        for (ProjectionTarget target : projectionLayer) {
+            if (isExcludedColor(target.state())) {
+                excludedProjectionCells++;
+                continue;
+            }
+            targets.add(target);
+            placementMatrix.put(target.pos(), false);
+        }
+        // Bounds still come from the FULL projection, so excluding a color
+        // at its edge never shifts band centers or creates geometric gaps.
         orderTargetsBySnakeBands();
         // Recover from the actual world on every activation, including a
         // full game restart. Completed cells never enter the work queue.
@@ -729,7 +865,47 @@ public final class LitematicaMapArtModule extends Module {
             isSatisfied(target);
         }
         targetIndex = remainingTargets.isEmpty() ? targets.size() : remainingTargets.firstKey();
-        return true;
+        workPlanDirty = false;
+    }
+
+    private void applyWorkPlanUpdate() {
+        releaseMovement();
+        if (!mc.player.currentScreenHandler.getCursorStack().isEmpty()
+            || (pendingInventoryMerge != null && tick < mergeWaitUntil)) {
+            activity = "等待背包操作结束后更新蛇形路线和颜色筛选";
+            return;
+        }
+        if (state == TaskState.RESTOCK) closeSupplyScreen();
+        cancelQueuedPlacements();
+        resetNavigation();
+        resetRestockTransfer();
+        pendingRestockTarget = null;
+        pendingInventoryMerge = null;
+        mergeItem = ItemStack.EMPTY;
+        supplyItem = null;
+        supplyAmount = 0;
+        supplyChest = null;
+        supplyStand = null;
+        supplyChestLabel = null;
+        reservedSupplySlots = 0;
+        supplyReceivedThisRound = 0;
+        supplyOpenTick = -1;
+        supplyOpenSyncId = -1;
+        supplyAimTick = -1;
+        returningFromRestock = false;
+        restockReturnPos = null;
+        returnWorkLane = -1;
+        returnMaterialReserve.clear();
+        supplyCheckedLane = -1;
+        workGoalTarget = null;
+        verificationIndex = 0;
+        verificationPass = 0;
+        rebuildFilteredMatrix();
+        buildSnakeWaypoints();
+        state = TaskState.WORK;
+        activity = "施工设置已更新，继续" + (reverseSnake.get() ? "反向" : "正向") + "蛇形铺设";
+        info("施工设置已更新：%s蛇形，排除 %d 格，已完成 %d 格，还需铺设 %d 格。",
+            reverseSnake.get() ? "反向" : "正向", excludedProjectionCells, completedMatrixCells(), remainingTargets.size());
     }
 
     private void orderTargetsBySnakeBands() {
@@ -767,114 +943,7 @@ public final class LitematicaMapArtModule extends Module {
             tickReturnFromRestock();
             return;
         }
-        if (!snakeCleanupMode) {
-            tickSnakeWork();
-            return;
-        }
-        // First exhaust every confirmed-unfinished cell the player can reach
-        // from the current standing position. This is the fast path: walking
-        // is deferred until the local placement matrix has no usable cell.
-        ProjectionTarget nearby = selectReachableMatrixTarget();
-        if (nearby != null) {
-            if (tick >= nextActionTick) placeTarget(nearby);
-            else releaseMovement();
-            return;
-        }
-        if (holdForPlacementConfirmation()) return;
-        // A rotation click may still be completing on the next tick. After
-        // that, walk during the placement cooldown if nothing nearby needs
-        // the current standing position.
-        if (tick - lastPlacementDispatchTick < 2) {
-            releaseMovement();
-            return;
-        }
-
-        Integer workGoalIndex = workGoalTarget == null ? null : targetIndices.get(workGoalTarget.pos());
-        if (workGoalTarget != null && (workGoalIndex == null || !remainingTargets.containsKey(workGoalIndex)
-            || blockedTargets.contains(workGoalTarget.pos()) || !hasItem(workGoalTarget.state().getBlock().asItem()))) {
-            workGoalTarget = null;
-            workGoalIndex = null;
-        }
-        // Give the rotation/click a brief moment to settle, then continue to
-        // another target instead of waiting here for the full server reply.
-        if (workGoalTarget != null && isPlacementPending(workGoalTarget.pos())) {
-            long sentAt = dispatchedPlacements.get(workGoalTarget.pos());
-            if (tick - sentAt < 2) {
-                releaseMovement();
-                return;
-            }
-            workGoalTarget = null;
-        }
-        WorkChoice stocked = workGoalTarget == null
-            ? findStockedTarget() : new WorkChoice(Map.entry(workGoalIndex, workGoalTarget), Double.NEGATIVE_INFINITY);
-        WorkChoice missing = workGoalTarget == null ? findRestockTarget() : null;
-        if (missing != null && (stocked == null || missing.score() < stocked.score())) {
-            if (!dispatchedPlacements.isEmpty()) {
-                releaseMovement();
-                activity = "等待附近放置确认后补货";
-                return;
-            }
-            targetIndex = missing.target().getKey();
-            beginRestock(missing.target().getValue());
-            return;
-        }
-        Map.Entry<Integer, ProjectionTarget> next = stocked == null ? null : stocked.target();
-        if (next == null) {
-            workGoalTarget = null;
-            if (!dispatchedPlacements.isEmpty()) {
-                releaseMovement();
-                activity = "等待已放置方块的服务器确认";
-                return;
-            }
-            next = findNearestUnblockedTarget();
-            if (next != null) {
-                targetIndex = next.getKey();
-                beginRestock(next.getValue());
-                return;
-            }
-            verificationIndex = 0;
-            state = TaskState.VERIFY;
-            activity = "全图复查";
-            return;
-        }
-
-        targetIndex = next.getKey();
-        ProjectionTarget target = next.getValue();
-        workGoalTarget = target;
-        if (isSatisfied(target)) {
-            workGoalTarget = null;
-            return;
-        }
-        if (blockedTargets.contains(target.pos())) {
-            workGoalTarget = null;
-            return;
-        }
-        Item requiredItem = target.state().getBlock().asItem();
-        if (!hasItem(requiredItem)) {
-            if (isSupplyTemporarilyDeferred(requiredItem)) {
-                deferCurrentTarget(requiredItem);
-                return;
-            }
-            beginRestock(target);
-            return;
-        }
-        // A carpet has a real (thin) collision shape. The player can overlap
-        // a neighbouring target even when getBlockPos() differs, so use the
-        // actual collision box and step away before placing.
-        if (!isWithinPlaceRange(target) || playerIntersectsTarget(target)) {
-            BlockPos stand = findPlacementStandNear(target.pos(), 4);
-            if (stand == null || navigateTo(stand) == NavigationResult.UNREACHABLE) {
-                blockedTargets.add(target.pos());
-                workGoalTarget = null;
-                warning("无法从真实地面靠近 %s；本轮跳过，最终复查会报告。", target.pos().toShortString());
-                resetNavigation();
-            } else {
-                activity = "前往下一片可放置区域";
-            }
-            return;
-        }
-
-        placeTarget(target);
+        tickSnakeWork();
     }
 
     private void buildSnakeWaypoints() {
@@ -885,14 +954,17 @@ public final class LitematicaMapArtModule extends Module {
         snakeSweepCompleted = false;
         snakeSkippedWaypoints = 0;
         if (mc.player == null || targets.isEmpty()) return;
-        BlockPos start = mc.player.getBlockPos();
+        // Keep the normal route's reference point fixed during this run.
+        // Toggling direction after travelling to a chest must not redefine
+        // which end is considered the normal start.
+        BlockPos start = workOrigin == null ? mc.player.getBlockPos() : workOrigin;
         int width = Math.max(1, workingBandWidth);
         Set<Integer> activeLanes = new HashSet<>();
         for (ProjectionTarget target : remainingTargets.values()) {
             activeLanes.add(target.lane());
         }
         for (MapArtBandGeometry.Sweep sweep : MapArtBandGeometry.snakeSweeps(
-            minX, maxX, minZ, maxZ, width, activeLanes, start.getX(), start.getZ())) {
+            minX, maxX, minZ, maxZ, width, activeLanes, start.getX(), start.getZ(), reverseSnake.get())) {
             BlockPos first = new BlockPos(sweep.firstX(), walkY, sweep.centerZ());
             BlockPos last = new BlockPos(sweep.lastX(), walkY, sweep.centerZ());
             snakeEntryWaypoints.add(snakeWaypoints.size());
@@ -915,7 +987,8 @@ public final class LitematicaMapArtModule extends Module {
                 break;
             }
         }
-        info("蛇形工作线：从当前位置单程扫描 %d 个路点。", snakeWaypoints.size());
+        info("%s蛇形工作线：从%s端开始，单程扫描 %d 个路点。",
+            reverseSnake.get() ? "反向" : "正向", reverseSnake.get() ? "正常路线终点" : "正常路线起点", snakeWaypoints.size());
     }
 
     private boolean holdForPlacementConfirmation() {
@@ -931,6 +1004,8 @@ public final class LitematicaMapArtModule extends Module {
             finishReturnToWork();
             return;
         }
+        // Restock travel may fill reachable cells, but never changes the
+        // saved snake waypoint or the next band's reserved materials.
         ProjectionTarget nearby = selectReachableMatrixTarget();
         if (nearby != null) {
             if (tick >= nextActionTick) placeTarget(nearby);
@@ -947,7 +1022,7 @@ public final class LitematicaMapArtModule extends Module {
             finishReturnToWork();
             return;
         }
-        activity = "补货返程：沿途铺设，保留当前扫描带材料";
+        activity = "补货返程：沿途铺设，随后继续蛇形工作线";
     }
 
     private void finishReturnToWork() {
@@ -1127,13 +1202,14 @@ public final class LitematicaMapArtModule extends Module {
         if (deficits.isEmpty()) return null;
         Set<Item> upcoming = laneDemand.keySet();
         Set<Item> heldItems = inventoryItems();
+        boolean canCompact = findInventoryMerge() != null;
         ProjectionTarget best = null;
         int largestDeficit = 0;
         for (Map.Entry<Item, Integer> entry : deficits.entrySet()) {
             Item item = entry.getKey();
             int reserved = reservedSlotsForOtherColors(item, upcoming, heldItems);
             if (!hasUsableSupply(item, reserved)) continue;
-            if (inventoryCapacity(item, reserved) <= 0) continue;
+            if (inventoryCapacity(item, reserved) <= 0 && !canCompact) continue;
             int deficit = entry.getValue();
             if (deficit > largestDeficit) {
                 largestDeficit = deficit;
@@ -1144,8 +1220,15 @@ public final class LitematicaMapArtModule extends Module {
     }
 
     private boolean hasRemainingWorkInLane(int lane) {
-        return remainingTargets.values().stream()
-            .anyMatch(target -> target.lane() == lane && !blockedTargets.contains(target.pos()));
+        // Another player can finish a band before we get there. Refresh it
+        // from the shared world before deciding to walk or restock for it.
+        boolean unfinished = false;
+        for (ProjectionTarget target : new ArrayList<>(remainingTargets.values())) {
+            if (target.lane() != lane) continue;
+            boolean satisfied = isSatisfied(target);
+            if (!satisfied && !blockedTargets.contains(target.pos())) unfinished = true;
+        }
+        return unfinished;
     }
 
     private boolean isPlacementPending(BlockPos pos) {
@@ -1223,6 +1306,20 @@ public final class LitematicaMapArtModule extends Module {
     }
 
     private void beginRestock(ProjectionTarget current) {
+        // Do not calculate quotas until existing partial stacks are merged.
+        // This phase runs once per supply trip, not once per chest/color.
+        pendingRestockTarget = current;
+        pendingInventoryMerge = null;
+        mergeItem = ItemStack.EMPTY;
+        mergeOperations = 0;
+        slotsBeforeMerge = emptyInventorySlots();
+        resetNavigation();
+        state = TaskState.COMPACT_INVENTORY;
+        activity = "补货前合并背包中的同类物品";
+    }
+
+    private void beginRestockAfterCompaction(ProjectionTarget current) {
+        state = TaskState.WORK;
         BlockPos returnPos = mc.player.getBlockPos().toImmutable();
         resetNavigation();
         if (!selectNextSupply(current.state().getBlock().asItem())) {
@@ -1260,6 +1357,115 @@ public final class LitematicaMapArtModule extends Module {
         activity = "前往补给箱";
     }
 
+    private InventoryMergePlanner.Merge findInventoryMerge() {
+        if (mc.player == null) return null;
+        List<InventoryMergePlanner.Stack<ItemStack>> stacks = new ArrayList<>();
+        // Player inventory indices 0..35 cover hotbar and main storage only.
+        for (int slot = 0; slot < 36; slot++) {
+            ItemStack stack = mc.player.getInventory().getStack(slot);
+            if (!stack.isEmpty()) stacks.add(new InventoryMergePlanner.Stack<>(slot, stack, stack.getCount(), stack.getMaxCount()));
+        }
+        return InventoryMergePlanner.next(stacks, ItemStack::areItemsAndComponentsEqual);
+    }
+
+    private static int playerInventoryScreenSlot(int inventorySlot) {
+        return inventorySlot < 9 ? 36 + inventorySlot : inventorySlot;
+    }
+
+    private boolean matchesMergedStack(int slot, int count) {
+        ItemStack actual = mc.player.getInventory().getStack(slot);
+        return count == 0 ? actual.isEmpty()
+            : actual.getCount() == count && ItemStack.areItemsAndComponentsEqual(actual, mergeItem);
+    }
+
+    private void pauseInventoryCompaction(String reason) {
+        releaseMovement();
+        pendingInventoryMerge = null;
+        pendingRestockTarget = null;
+        mergeItem = ItemStack.EMPTY;
+        state = TaskState.PAUSED;
+        activity = "背包整理暂停：" + reason;
+        warning("%s；未继续开箱或丢弃物品，请检查背包后重新开启。", activity);
+    }
+
+    private void tickInventoryCompaction() {
+        releaseMovement();
+        checkDispatchedPlacements();
+        if (printer.hasQueuedProjectionPlacement() || !dispatchedPlacements.isEmpty()) return;
+        if (mc.interactionManager == null) return;
+        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler) {
+            activity = "整理背包前请先关闭当前容器";
+            return;
+        }
+        var handler = mc.player.playerScreenHandler;
+        if (!handler.getCursorStack().isEmpty()) {
+            pauseInventoryCompaction("鼠标上已有物品");
+            return;
+        }
+        if (pendingInventoryMerge != null) {
+            if (tick < mergeWaitUntil) {
+                activity = "等待背包合并同步";
+                return;
+            }
+            if (!matchesMergedStack(pendingInventoryMerge.source(), pendingInventoryMerge.sourceAfter())
+                || !matchesMergedStack(pendingInventoryMerge.destination(), pendingInventoryMerge.destinationAfter())) {
+                pauseInventoryCompaction("合并结果发生变化或被服务器回退");
+                return;
+            }
+            pendingInventoryMerge = null;
+            mergeItem = ItemStack.EMPTY;
+        }
+        InventoryMergePlanner.Merge merge = findInventoryMerge();
+        if (merge == null) {
+            ProjectionTarget target = pendingRestockTarget;
+            pendingRestockTarget = null;
+            minimumTakeCapacity.clear();
+            capacityRecheckAt.clear();
+            if (mergeOperations > 0) info("背包合并完成：%d 次合并，新增 %d 个空格；重新计算条带补货量。",
+                mergeOperations, Math.max(0, emptyInventorySlots() - slotsBeforeMerge));
+            if (target == null) state = TaskState.WORK;
+            else beginRestockAfterCompaction(target);
+            return;
+        }
+        // Each merge reduces the number of partial stacks by at least one.
+        if (++mergeOperations > 36) {
+            pauseInventoryCompaction("整理过程中背包持续变化");
+            return;
+        }
+        mergeItem = mc.player.getInventory().getStack(merge.source()).copy();
+        int sourceSlot = playerInventoryScreenSlot(merge.source());
+        int destinationSlot = playerInventoryScreenSlot(merge.destination());
+        boolean failed = false;
+        try {
+            // Complete pickup -> merge -> return remainder in the SAME tick.
+            // Never leave a cursor-held stack as a multi-tick task state.
+            mc.interactionManager.clickSlot(handler.syncId, sourceSlot, 0, SlotActionType.PICKUP, mc.player);
+            mc.interactionManager.clickSlot(handler.syncId, destinationSlot, 0, SlotActionType.PICKUP, mc.player);
+        } catch (RuntimeException exception) {
+            failed = true;
+        } finally {
+            ItemStack cursor = handler.getCursorStack();
+            ItemStack source = mc.player.getInventory().getStack(merge.source());
+            if (!cursor.isEmpty() && mc.player.currentScreenHandler == handler
+                && ItemStack.areItemsAndComponentsEqual(cursor, mergeItem)
+                && (source.isEmpty() || ItemStack.areItemsAndComponentsEqual(source, cursor))
+                && source.getCount() + cursor.getCount() <= cursor.getMaxCount()) {
+                try {
+                    mc.interactionManager.clickSlot(handler.syncId, sourceSlot, 0, SlotActionType.PICKUP, mc.player);
+                } catch (RuntimeException exception) {
+                    failed = true;
+                }
+            }
+        }
+        if (failed || !handler.getCursorStack().isEmpty()) {
+            pauseInventoryCompaction("无法安全完成合并");
+            return;
+        }
+        pendingInventoryMerge = merge;
+        mergeWaitUntil = tick + 6;
+        activity = "合并同类物品，等待背包同步";
+    }
+
     private WorkChoice findStockedTarget() {
         Set<Item> heldItems = inventoryItems();
         Map<Long, WorkRegion> regions = new HashMap<>();
@@ -1279,7 +1485,7 @@ public final class LitematicaMapArtModule extends Module {
     }
 
     private WorkChoice findRestockTarget() {
-        if (emptyInventorySlots() == 0) return null;
+        if (emptyInventorySlots() == 0 && findInventoryMerge() == null) return null;
         Set<Item> heldItems = inventoryItems();
         Set<Item> restockable = new HashSet<>();
         for (Item item : supplies.keySet()) {
@@ -1416,7 +1622,7 @@ public final class LitematicaMapArtModule extends Module {
         Integer minimum = minimumTakeCapacity.get(item);
         if (minimum != null) {
             if (inventoryCapacity(item, reserved) < minimum
-                && tick < capacityRecheckAt.getOrDefault(item, tick)) return false;
+                && tick < capacityRecheckAt.getOrDefault(item, tick) && findInventoryMerge() == null) return false;
             minimumTakeCapacity.remove(item);
             capacityRecheckAt.remove(item);
         }
@@ -1467,18 +1673,16 @@ public final class LitematicaMapArtModule extends Module {
         if (didRestock && restockReturnPos != null && !hasReached(restockReturnPos)) {
             if (!isStandUsable(restockReturnPos)) restockReturnPos = findStandNear(restockReturnPos, 2);
             returningFromRestock = restockReturnPos != null;
-            if (!snakeCleanupMode) {
-                List<List<ProjectionTarget>> bands = upcomingTargetBands();
-                if (!bands.isEmpty()) {
-                    returnWorkLane = bands.getFirst().getFirst().lane();
-                    returnMaterialReserve.putAll(materialCounts(bands.getFirst()));
-                }
+            List<List<ProjectionTarget>> bands = upcomingTargetBands();
+            if (!bands.isEmpty()) {
+                returnWorkLane = bands.getFirst().getFirst().lane();
+                returnMaterialReserve.putAll(materialCounts(bands.getFirst()));
             }
         } else {
             restockReturnPos = null;
         }
         state = TaskState.WORK;
-        activity = returningFromRestock ? "补货结束，规划沿路铺设的返程" : "补货结束，继续铺设";
+        activity = returningFromRestock ? "补货结束，沿途铺设并返回蛇形工作位置" : "补货结束，继续铺设";
     }
 
     private void continueRestock() {
@@ -1505,8 +1709,8 @@ public final class LitematicaMapArtModule extends Module {
             if (isSatisfied(target) || blockedTargets.contains(target.pos())) continue;
             Item item = target.state().getBlock().asItem();
             if (hasItem(item)) return true;
-            if (hasUsableSupply(item) && inventoryCapacity(item,
-                reservedSlotsForOtherColors(item, upcoming, heldItems)) > 0) return true;
+            if (hasUsableSupply(item) && (inventoryCapacity(item,
+                reservedSlotsForOtherColors(item, upcoming, heldItems)) > 0 || findInventoryMerge() != null)) return true;
         }
         return false;
     }
@@ -1568,7 +1772,7 @@ public final class LitematicaMapArtModule extends Module {
     /** Actual snake order, excluding cells already completed in the real world. */
     private List<List<ProjectionTarget>> upcomingTargetBands() {
         Map<Integer, List<ProjectionTarget>> byLane = new LinkedHashMap<>();
-        boolean cleanup = snakeCleanupMode || snakeWaypointIndex >= snakeWaypointLanes.size();
+        boolean cleanup = snakeWaypointIndex >= snakeWaypointLanes.size();
         if (!cleanup) {
             for (int index = snakeWaypointIndex; index < snakeWaypointLanes.size(); index++) {
                 int lane = snakeWaypointLanes.get(index);
@@ -1878,7 +2082,7 @@ public final class LitematicaMapArtModule extends Module {
         if (verificationIndex < targets.size()) return;
         int incomplete = targets.size() - completedMatrixCells();
         if (incomplete == 0) {
-            info("自动地图画完成：%d 个投影方块已复查。", targets.size());
+            info("自动地图画完成：%d 个投影方块已复查，颜色筛选跳过 %d 格。", targets.size(), excludedProjectionCells);
             disable();
             return;
         }
@@ -1902,14 +2106,15 @@ public final class LitematicaMapArtModule extends Module {
             state = TaskState.PAUSED;
             return;
         }
-        if (snakeSweepCompleted && !snakeCleanupMode) {
-            snakeCleanupMode = true;
+        if (snakeSweepCompleted && verificationPass == 0) {
             verificationPass = 1;
             targetIndex = remainingTargets.isEmpty() ? targets.size() : remainingTargets.firstKey();
             resetNavigation();
+            buildSnakeWaypoints();
+            supplyCheckedLane = -1;
             state = TaskState.WORK;
-            activity = "蛇形扫描结束，定向补扫剩余 " + incomplete + " 格";
-            info("蛇形扫描跳过 %d 个不可达路点；开始按剩余矩阵补扫。", snakeSkippedWaypoints);
+            activity = "蛇形扫描结束，按条带补扫剩余 " + incomplete + " 格";
+            info("复查发现 %d 格遗漏，继续按蛇形条带补扫；已完成的条带直接跳过。", incomplete);
             return;
         }
         if (verificationPass++ >= 1) {
@@ -2087,7 +2292,19 @@ public final class LitematicaMapArtModule extends Module {
                 // Avoid this exact step on the next BFS instead of planning
                 // the same blocked edge forever.
                 releaseMovement();
-                if (pendingStep != null) avoidedRouteCells.add(pendingStep);
+                if (pendingStep != null) {
+                    // A smoothed supply waypoint may be far away. Avoid the
+                    // immediate blocked step, not the chest/return endpoint.
+                    BlockPos blockedStep = pendingStep;
+                    if (isSupplyTravel() && horizontalDistanceSquared(pendingStep) > 2.25) {
+                        double dx = pendingStep.getX() + 0.5 - mc.player.getX();
+                        double dz = pendingStep.getZ() + 0.5 - mc.player.getZ();
+                        double length = Math.hypot(dx, dz);
+                        blockedStep = BlockPos.ofFloored(mc.player.getX() + dx / length * 0.9,
+                            walkY, mc.player.getZ() + dz / length * 0.9);
+                    }
+                    if (!blockedStep.equals(mc.player.getBlockPos())) avoidedRouteCells.add(blockedStep);
+                }
             }
             if (pathAttempts > routeRetries.get()) return NavigationResult.UNREACHABLE;
             pathAttempts++;
@@ -2099,10 +2316,21 @@ public final class LitematicaMapArtModule extends Module {
             lastPathDistance = Double.POSITIVE_INFINITY;
         }
         if (pathIndex >= path.size()) return hasReached(goal) ? NavigationResult.ARRIVED : NavigationResult.MOVING;
+        if (isSupplyTravel()) {
+            // Shorten a detour to its furthest safely visible near-future
+            // waypoint. Do not apply this to the printing serpentine route.
+            for (int index = Math.min(path.size() - 1, pathIndex + 32); index > pathIndex; index--) {
+                if (!canWalkDirectlyTo(path.get(index))) continue;
+                pathIndex = index;
+                lastPathDistance = Double.POSITIVE_INFINITY;
+                break;
+            }
+        }
         BlockPos next = path.get(pathIndex);
-        if (!isStandUsable(next)) {
+        if (!isStandUsable(next) || (isSupplyTravel() && !canWalkDirectlyTo(next))) {
             path.clear();
             pathIndex = 0;
+            releaseMovement();
             return NavigationResult.MOVING;
         }
         double distance = Math.sqrt(horizontalDistanceSquared(next));
@@ -2121,6 +2349,12 @@ public final class LitematicaMapArtModule extends Module {
         lastProgressTick = tick;
         lastPathDistance = Double.POSITIVE_INFINITY;
         BlockPos start = mc.player.getBlockPos().toImmutable();
+        if (isSupplyTravel() && canWalkDirectlyTo(goal)) {
+            // A single waypoint makes the actual movement diagonal rather
+            // than a staircase of four-direction grid steps.
+            path.add(goal.toImmutable());
+            return true;
+        }
         int margin = 4;
         int minPathX = Math.min(Math.min(minX, start.getX()), goal.getX()) - margin;
         int maxPathX = Math.max(Math.max(maxX, start.getX()), goal.getX()) + margin;
@@ -2130,17 +2364,11 @@ public final class LitematicaMapArtModule extends Module {
         Map<BlockPos, BlockPos> parents = new HashMap<>();
         Map<BlockPos, Integer> depths = new HashMap<>();
         Map<BlockPos, Integer> scores = new HashMap<>();
-        Map<BlockPos, Integer> benefitCache = new HashMap<>();
-        Map<Item, Integer> held = new HashMap<>();
-        boolean productiveReturn = returningFromRestock && goal.equals(restockReturnPos);
-        int scanLane = state == TaskState.WORK && !returningFromRestock && !snakeCleanupMode
+        int scanLane = state == TaskState.WORK && !returningFromRestock
             && snakeWaypointIndex < snakeWaypointLanes.size() ? snakeWaypointLanes.get(snakeWaypointIndex) : -1;
         boolean centeredSweep = scanLane >= 0;
         int centerZ = centeredSweep ? MapArtBandGeometry.centerZ(minZ, maxZ, workingBandWidth, scanLane) : 0;
-        boolean scoreEqualRoutes = productiveReturn || centeredSweep;
-        if (productiveReturn) {
-            for (Item item : inventoryItems()) held.put(item, countInventory(item));
-        }
+        boolean scoreEqualRoutes = centeredSweep;
         open.add(start);
         parents.put(start, null);
         depths.put(start, 0);
@@ -2163,8 +2391,7 @@ public final class LitematicaMapArtModule extends Module {
                 if (next.getX() < minPathX || next.getX() > maxPathX || next.getZ() < minPathZ || next.getZ() > maxPathZ
                     || next.getY() != walkY || avoidedRouteCells.contains(next)
                     || !isStandUsable(next) || Math.abs(standSurfaceY(next) - standSurfaceY(current)) > 0.6) continue;
-                int benefit = productiveReturn ? benefitCache.computeIfAbsent(next, pos -> returnPathBenefit(pos, held))
-                    : centeredSweep ? -Math.abs(next.getZ() - centerZ) : 0;
+                int benefit = centeredSweep ? -Math.abs(next.getZ() - centerZ) : 0;
                 int score = scoreEqualRoutes ? scores.get(current) + benefit : 0;
                 if (knownDepth == null || score > scores.get(next)) {
                     parents.put(next, current);
@@ -2177,23 +2404,18 @@ public final class LitematicaMapArtModule extends Module {
         return false;
     }
 
-    private int returnPathBenefit(BlockPos stand, Map<Item, Integer> held) {
-        int useful = 0;
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                if (dx == 0 && dz == 0) continue;
-                Integer index = targetIndices.get(stand.add(dx, 0, dz));
-                ProjectionTarget target = index == null ? null : remainingTargets.get(index);
-                if (target == null || blockedTargets.contains(target.pos()) || isPlacementPending(target.pos())
-                    || mc.world.getBlockState(target.pos()).equals(target.state())) continue;
-                Item item = target.state().getBlock().asItem();
-                int available = held.getOrDefault(item, 0);
-                if (available > 0 && (target.lane() == returnWorkLane
-                    || available > returnMaterialReserve.getOrDefault(item, 0))) useful++;
-            }
-        }
-        return Math.min(8, useful) * 2
-            + (mc.world.getBlockState(stand).getBlock() instanceof CarpetBlock ? 0 : 1);
+    private boolean isSupplyTravel() {
+        return state == TaskState.RESTOCK || returningFromRestock;
+    }
+
+    private boolean canWalkDirectlyTo(BlockPos goal) {
+        if (goal.getY() != walkY) return false;
+        return GroundPathVisibility.canWalk(mc.player.getX(), mc.player.getZ(), goal.getX() + 0.5, goal.getZ() + 0.5,
+            mc.player.getWidth() / 2.0, 0.6, pathSearchLimit.get(), (x, z) -> {
+                BlockPos pos = new BlockPos(x, walkY, z);
+                if (avoidedRouteCells.contains(pos) || !mc.world.isChunkLoaded(pos) || !isStandUsable(pos)) return Double.NaN;
+                return standSurfaceY(pos);
+            });
     }
 
     private BlockPos findStandNear(BlockPos focus, int radius) {
@@ -2338,9 +2560,17 @@ public final class LitematicaMapArtModule extends Module {
         restockReturnPos = null;
         returningFromRestock = false;
         returnWorkLane = -1;
-        supplyCheckedLane = -1;
         returnMaterialReserve.clear();
+        supplyCheckedLane = -1;
+        pendingRestockTarget = null;
+        pendingInventoryMerge = null;
+        mergeItem = ItemStack.EMPTY;
+        mergeWaitUntil = 0;
+        mergeOperations = 0;
         targets.clear();
+        projectionLayer.clear();
+        workPlanDirty = false;
+        excludedProjectionCells = 0;
         blockedTargets.clear();
         placementMatrix.clear();
         targetIndices.clear();
@@ -2374,7 +2604,6 @@ public final class LitematicaMapArtModule extends Module {
         snakeEntryWaypoints.clear();
         snakeWaypointIndex = 0;
         snakeSweepCompleted = false;
-        snakeCleanupMode = false;
         snakeSkippedWaypoints = 0;
         tick = 0;
         lastStatusMessageTick = 0;
@@ -2395,6 +2624,27 @@ public final class LitematicaMapArtModule extends Module {
     }
 
     private record ProjectionTarget(BlockPos pos, BlockState state, int lane) { }
+
+    private static final class ColorSwatch extends WWidget {
+        private final Color color;
+
+        private ColorSwatch(DyeColor dye) {
+            int rgb = dye.getEntityColor();
+            color = new Color((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 255);
+        }
+
+        @Override
+        protected void onCalculateSize() {
+            width = height = theme.scale(20);
+        }
+
+        @Override
+        protected void onRender(GuiRenderer renderer, double mouseX, double mouseY, double delta) {
+            double border = theme.scale(1);
+            renderer.quad(x, y, width, height, new Color(150, 150, 150, 255));
+            renderer.quad(x + border, y + border, width - 2 * border, height - 2 * border, color);
+        }
+    }
 
     private record WorkChoice(Map.Entry<Integer, ProjectionTarget> target, double score) { }
 
@@ -2418,5 +2668,5 @@ public final class LitematicaMapArtModule extends Module {
 
     private enum NavigationResult { MOVING, ARRIVED, UNREACHABLE }
 
-    private enum TaskState { IDLE, REGISTERING, WORK, RESTOCK, VERIFY, WAITING_SUPPLY_RECHECK, WAITING_CAPACITY, PAUSED }
+    private enum TaskState { IDLE, REGISTERING, WORK, COMPACT_INVENTORY, RESTOCK, VERIFY, WAITING_SUPPLY_RECHECK, WAITING_CAPACITY, PAUSED }
 }

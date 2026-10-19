@@ -26,6 +26,11 @@ public final class MapArtBandGeometry {
 
     public static List<Sweep> snakeSweeps(int minX, int maxX, int minZ, int maxZ, int width,
                                          Set<Integer> activeLanes, int playerX, int playerZ) {
+        return snakeSweeps(minX, maxX, minZ, maxZ, width, activeLanes, playerX, playerZ, false);
+    }
+
+    public static List<Sweep> snakeSweeps(int minX, int maxX, int minZ, int maxZ, int width,
+                                         Set<Integer> activeLanes, int playerX, int playerZ, boolean reverseTraversal) {
         List<Integer> lanes = new ArrayList<>(activeLanes);
         Collections.sort(lanes);
         if (lanes.isEmpty()) return List.of();
@@ -54,6 +59,12 @@ public final class MapArtBandGeometry {
             result.add(new Sweep(lane, leftToRight ? minX : maxX, leftToRight ? maxX : minX,
                 centerZ(minZ, maxZ, width, lane)));
             leftToRight = !leftToRight;
+        }
+        // Reverse the complete route, including each band's X direction.
+        // Just flipping lane order breaks the joins for an even band count.
+        if (reverseTraversal) {
+            Collections.reverse(result);
+            result.replaceAll(sweep -> new Sweep(sweep.lane(), sweep.lastX(), sweep.firstX(), sweep.centerZ()));
         }
         return result;
     }

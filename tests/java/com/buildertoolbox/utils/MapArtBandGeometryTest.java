@@ -34,7 +34,34 @@ public final class MapArtBandGeometryTest {
         equal(0, resumed.getFirst().lastX(), "one pass toward opposite endpoint");
         equal(0, resumed.getLast().firstX(), "completed band is skipped without diagonal backtrack");
         equal(2, resumed.getLast().centerZ(), "completed cells do not shift center");
-        System.out.println("MapArtBandGeometry: serpentine continuity, reach and coverage checks passed.");
+        // Odd/even band counts, sparse unfinished bands and each possible
+        // normal corner must all produce the exact opposite traversal.
+        for (Set<Integer> lanes : java.util.List.of(Set.of(0), Set.of(0, 1), Set.of(0, 1, 2),
+            Set.of(0, 2, 3, 5), Set.<Integer>of())) {
+            for (int playerX : new int[] {-20, 150}) {
+                for (int playerZ : new int[] {-30, 160}) {
+                    checkReverse(-7, 127, -12, 17, lanes, playerX, playerZ);
+                    checkReverse(5, 5, -12, 17, lanes, playerX, playerZ);
+                }
+            }
+        }
+        System.out.println("MapArtBandGeometry: serpentine continuity, reach, coverage and exact reverse traversal checks passed.");
+    }
+
+    private static void checkReverse(int minX, int maxX, int minZ, int maxZ, Set<Integer> lanes,
+                                     int playerX, int playerZ) {
+        var normal = MapArtBandGeometry.snakeSweeps(minX, maxX, minZ, maxZ, 5, lanes, playerX, playerZ);
+        var reverse = MapArtBandGeometry.snakeSweeps(minX, maxX, minZ, maxZ, 5, lanes, playerX, playerZ, true);
+        equal(normal.size(), reverse.size(), "reverse preserves all bands");
+        for (int i = 0; i < normal.size(); i++) {
+            var forward = normal.get(normal.size() - 1 - i);
+            var backward = reverse.get(i);
+            equal(forward.lane(), backward.lane(), "reverse band order");
+            equal(forward.lastX(), backward.firstX(), "reverse enters at forward exit");
+            equal(forward.firstX(), backward.lastX(), "reverse exits at forward entry");
+            equal(forward.centerZ(), backward.centerZ(), "same band center");
+            if (i > 0) equal(reverse.get(i - 1).lastX(), backward.firstX(), "reverse turns stay connected");
+        }
     }
 
     private static void equal(int expected, int actual, String message) {

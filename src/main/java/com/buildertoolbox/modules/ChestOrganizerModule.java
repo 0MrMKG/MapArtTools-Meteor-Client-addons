@@ -1,6 +1,7 @@
 package com.buildertoolbox.modules;
 
 import com.buildertoolbox.BuilderToolboxAddon;
+import com.buildertoolbox.utils.StorageBlockUtils;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -27,11 +28,8 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.CarpetBlock;
-import net.minecraft.block.ChestBlock;
-import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.SignBlockEntity;
 import net.minecraft.client.option.KeyBinding;
@@ -46,12 +44,10 @@ import net.minecraft.screen.ShulkerBoxScreenHandler;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.RaycastContext;
 import org.lwjgl.glfw.GLFW;
 
 /** Moves misplaced stacks between item-frame/sign-labeled containers. */
@@ -712,9 +708,7 @@ public final class ChestOrganizerModule extends Module {
     }
 
     private boolean isContainer(BlockPos pos) {
-        BlockState state = mc.world.getBlockState(pos);
-        return state.getBlock() instanceof ChestBlock || state.getBlock() instanceof BarrelBlock
-            || state.getBlock() instanceof ShulkerBoxBlock;
+        return StorageBlockUtils.isStorage(mc, pos);
     }
 
     private boolean labelStillMatches(BlockPos chest) {
@@ -733,7 +727,7 @@ public final class ChestOrganizerModule extends Module {
     }
 
     private int containerSlots(ScreenHandler handler) {
-        return handler instanceof GenericContainerScreenHandler generic ? generic.getRows() * 9 : 27;
+        return StorageBlockUtils.storageSlots(handler);
     }
 
     private void closeChest() {
@@ -742,15 +736,7 @@ public final class ChestOrganizerModule extends Module {
 
     private BlockHitResult findContainerHit(BlockPos pos, Vec3d eye) {
         if (!isContainer(pos)) return null;
-        for (Direction face : Direction.values()) {
-            Vec3d point = Vec3d.ofCenter(pos).add(face.getOffsetX() * 0.49,
-                face.getOffsetY() * 0.49, face.getOffsetZ() * 0.49);
-            if (eye.squaredDistanceTo(point) > 16.0) continue;
-            HitResult trace = mc.world.raycast(new RaycastContext(eye, point,
-                RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player));
-            if (trace instanceof BlockHitResult hit && hit.getBlockPos().equals(pos)) return hit;
-        }
-        return null;
+        return StorageBlockUtils.findHit(mc, pos, eye, 4.0);
     }
 
     private BlockPos findChestStand(BlockPos chest) {

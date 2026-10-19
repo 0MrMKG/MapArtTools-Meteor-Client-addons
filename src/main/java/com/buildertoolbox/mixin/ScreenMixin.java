@@ -1,6 +1,7 @@
 package com.buildertoolbox.mixin;
 
 import com.buildertoolbox.modules.LitematicaMapArtModule;
+import com.buildertoolbox.modules.FullAutoMapArtModule;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.Screen;
@@ -17,6 +18,11 @@ public abstract class ScreenMixin {
         Modules modules = Modules.get();
         if (modules == null) return;
         LitematicaMapArtModule mapArt = modules.get(LitematicaMapArtModule.class);
-        if (mapArt != null && mapArt.runsWithGameMenu()) cir.setReturnValue(false);
+        if (mapArt != null && mapArt.runsWithGameMenu()) {
+            cir.setReturnValue(false);
+            return;
+        }
+        FullAutoMapArtModule fullAuto = modules.get(FullAutoMapArtModule.class);
+        if (fullAuto != null && fullAuto.runsWithGameMenu()) cir.setReturnValue(false);
     }
 }
