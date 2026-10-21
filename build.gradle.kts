@@ -62,3 +62,40 @@ tasks {
         options.compilerArgs.add("-Xlint:unchecked")
     }
 }
+
+// Run the dependency-free planners/state-machine tests on every check/build.
+// Keep Minecraft runtime classes out of this standalone regression classpath.
+val regressionOutput = layout.buildDirectory.dir("regression-classes")
+val compileRegression by tasks.registering(JavaCompile::class) {
+    group = "verification"
+    description = "Compiles standalone regression checks and their pure Java helpers."
+    source(fileTree("tests/java") { include("**/*.java") })
+    source(provider {
+        fileTree("src/main/java") { include("**/*.java") }.files.filter { file ->
+            val source = file.readText(Charsets.UTF_8)
+            listOf("net.minecraft.", "meteordevelopment.", "fi.dy.", "net.fabricmc.", "org.lwjgl.", "org.spongepowered.")
+                .none { it in source }
+        }
+    })
+    classpath = files()
+    destinationDirectory.set(regressionOutput)
+    javaCompiler.set(javaToolchains.compilerFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+}
+
+val regressionRuns = fileTree("tests/java") { include("**/*Test.java") }.files.sortedBy { it.path }.map { source ->
+    tasks.register<JavaExec>("regression" + source.nameWithoutExtension) {
+        group = "verification"
+        dependsOn(compileRegression)
+        classpath = files(regressionOutput)
+        mainClass.set(source.relativeTo(file("tests/java")).invariantSeparatorsPath.removeSuffix(".java").replace('/', '.'))
+        javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+        workingDir(projectDir)
+    }
+}
+
+val regressionTest by tasks.registering {
+    group = "verification"
+    description = "Runs all standalone regression checks."
+    dependsOn(regressionRuns)
+}
+tasks.named("check") { dependsOn(regressionTest) }

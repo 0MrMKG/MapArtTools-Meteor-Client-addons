@@ -40,8 +40,10 @@ import net.minecraft.block.enums.SlabType;
 import net.minecraft.entity.Entity;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.client.gui.screen.ingame.Generic3x3ContainerScreen;
 import net.minecraft.screen.Generic3x3ContainerScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.network.packet.c2s.play.CloseHandledScreenC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
 import net.minecraft.state.property.Properties;
@@ -58,7 +60,7 @@ import net.minecraft.util.shape.VoxelShapes;
 import net.minecraft.util.function.BooleanBiFunction;
 import net.minecraft.world.RaycastContext;
 
-/** Source-compatible implementation of Xiaohe Lotus' Printer module. */
+/** Legacy printer implementation retained as Map Art Maker's unregistered placement engine. */
 public final class LitematicaPrinterModule extends Module {
     private static final int ROTATION_PRIORITY = 50;
 
@@ -209,7 +211,7 @@ public final class LitematicaPrinterModule extends Module {
         super(
             BuilderToolboxAddon.CATEGORY,
             "Auto Schematic Printer",
-            "Places nearby Litematica blocks without walking. Normal mode uses the same placement path as Map Art Maker."
+            "Internal placement engine for Map Art Maker; not registered as a standalone module."
         );
     }
 
@@ -236,6 +238,12 @@ public final class LitematicaPrinterModule extends Module {
         normalTick = 0;
         nextNormalPlacementTick = 0;
         missingSchematicReported = false;
+    }
+
+    /** Invalidate every external rotation callback when its owning worker stops or restarts. */
+    public void resetExternalPlacements() {
+        queuedProjectionPlacements.clear();
+        resetRuntime();
     }
 
     private boolean isNormalMode() {
@@ -576,6 +584,11 @@ public final class LitematicaPrinterModule extends Module {
 
     /** Xiaohe v(): select hotbar, rotate and interact without a confirmation queue. */
     private void dispatchPreparedPlacements() {
+        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler
+            || !mc.player.currentScreenHandler.getCursorStack().isEmpty()) {
+            preparedPlacements.clear();
+            return;
+        }
         for (PreparedPlacement placement : preparedPlacements) {
             BlockPos pos = placement.pos();
             PlacementPlan plan = placement.plan();
@@ -600,17 +613,29 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     /**
-     * Performs one projection placement without changing this module's active
-     * state.  The map-art worker uses this entry point so both features share
-     * the exact same item selection, support-face, raycast and rotation path,
-     * while their switches and progress remain completely independent.
+     * Performs one placement for the owning map-art worker. This engine is
+     * never registered or independently activated; the worker owns its lifetime.
      */
     public ExternalPlacementResult placeProjectionBlock(BlockPos pos, BlockState requiredState, double range) {
         return placeProjectionBlock(pos, requiredState, range, 0);
     }
 
     public ExternalPlacementResult placeProjectionBlock(BlockPos pos, BlockState requiredState, double range, int attempt) {
+        return placeProjectionBlock(pos, requiredState, range, attempt, false);
+    }
+
+    /** Frees a slot using only existing hotbar materials; never moves or closes the cursor inventory. */
+    public ExternalPlacementResult placeProjectionBlockForCursorRecovery(BlockPos pos, BlockState requiredState, double range) {
+        return placeProjectionBlock(pos, requiredState, range, 0, true);
+    }
+
+    private ExternalPlacementResult placeProjectionBlock(BlockPos pos, BlockState requiredState, double range, int attempt, boolean recoverCursor) {
         if (mc.player == null || mc.world == null || requiredState == null || requiredState.isAir()) {
+            return ExternalPlacementResult.BLOCKED;
+        }
+
+        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler
+            || !recoverCursor && !mc.player.currentScreenHandler.getCursorStack().isEmpty()) {
             return ExternalPlacementResult.BLOCKED;
         }
 
@@ -623,7 +648,7 @@ public final class LitematicaPrinterModule extends Module {
         Item item = requiredState.getBlock().asItem();
         if (!(item instanceof BlockItem)) return ExternalPlacementResult.BLOCKED;
 
-        FindItemResult slot = moveToHotbar(item);
+        FindItemResult slot = recoverCursor ? findCursorRecoveryHotbarItem(item) : moveToHotbar(item);
         if (!slot.found()) return ExternalPlacementResult.MISSING_ITEM;
         if (!slot.isHotbar()) return ExternalPlacementResult.BLOCKED;
 
@@ -639,9 +664,9 @@ public final class LitematicaPrinterModule extends Module {
         Rotations.rotate(rotation.yaw(), rotation.pitch(), ROTATION_PRIORITY, () -> {
             if (queuedProjectionPlacements.get(immutablePos) != token) return;
             queuedProjectionPlacements.remove(immutablePos);
-            interactWithSupportSneak(plan, immutablePos, item, true);
+            interactWithSupportSneak(plan, immutablePos, item, true, recoverCursor);
         });
-        mc.player.networkHandler.sendPacket(new CloseHandledScreenC2SPacket(mc.player.currentScreenHandler.syncId));
+        if (!recoverCursor) mc.player.networkHandler.sendPacket(new CloseHandledScreenC2SPacket(mc.player.currentScreenHandler.syncId));
         return ExternalPlacementResult.DISPATCHED;
     }
 
@@ -658,13 +683,19 @@ public final class LitematicaPrinterModule extends Module {
     }
 
     private void interactWithSupportSneak(PlacementPlan plan, BlockPos targetPos, Item expectedItem, boolean trackCancellation) {
+        interactWithSupportSneak(plan, targetPos, expectedItem, trackCancellation, false);
+    }
+
+    private void interactWithSupportSneak(PlacementPlan plan, BlockPos targetPos, Item expectedItem, boolean trackCancellation, boolean recoverCursor) {
         if (mc.player == null || mc.world == null) {
             if (trackCancellation) cancelledPlacements.add(targetPos.toImmutable());
             return;
         }
         // Rotation callbacks may run after an inventory change. Never click a
         // container with an empty or wrong hand; let the caller retry instead.
-        if (!mc.player.getMainHandStack().isOf(expectedItem)) {
+        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler
+            || !recoverCursor && !mc.player.currentScreenHandler.getCursorStack().isEmpty()
+            || !mc.player.getMainHandStack().isOf(expectedItem)) {
             if (trackCancellation) cancelledPlacements.add(targetPos.toImmutable());
             return;
         }
@@ -709,20 +740,51 @@ public final class LitematicaPrinterModule extends Module {
         ));
     }
 
-    /** Xiaohe inventory behavior: hotbar first, then move inventory into hotbar. */
+    /** Search only the actual main-hand hotbar; Meteor may otherwise prefer an offhand match. */
+    private FindItemResult findHotbarItem(Item item) {
+        for (int slot = 0; slot < 9; slot++) {
+            var stack = mc.player.getInventory().getStack(slot);
+            if (stack.isOf(item)) return new FindItemResult(slot, stack.getCount());
+        }
+        return new FindItemResult(-1, 0);
+    }
+
+    /** Prefer making room for this cursor, then consume the smallest remaining hotbar stack. */
+    private FindItemResult findCursorRecoveryHotbarItem(Item item) {
+        ItemStack cursor = mc.player.currentScreenHandler.getCursorStack();
+        int best = -1;
+        int smallest = Integer.MAX_VALUE;
+        boolean bestCompatible = false;
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = mc.player.getInventory().getStack(slot);
+            if (!stack.isOf(item)) continue;
+            boolean compatible = ItemStack.areItemsAndComponentsEqual(stack, cursor);
+            if (best < 0 || compatible && !bestCompatible
+                || compatible == bestCompatible && stack.getCount() < smallest) {
+                best = slot;
+                smallest = stack.getCount();
+                bestCompatible = compatible;
+            }
+        }
+        return new FindItemResult(best, best < 0 ? 0 : smallest);
+    }
+
+    /** Xiaohe inventory behavior: hotbar first, then one atomic swap from main inventory. */
     private FindItemResult moveToHotbar(Item item) {
-        FindItemResult hotbar = InvUtils.findInHotbar(item);
+        FindItemResult hotbar = findHotbarItem(item);
         if (hotbar.found()) return hotbar;
+        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler
+            || !mc.player.currentScreenHandler.getCursorStack().isEmpty()) return new FindItemResult(-1, 0);
 
-        FindItemResult inventory = InvUtils.find(item);
-        if (!inventory.found() || !inventory.isMain()) return inventory;
-
-        // Xiaohe HeInvUtils.b(slot) moves a main-inventory stack into the
-        // currently selected hotbar slot; it does not search for an empty
-        // hotbar slot first.
-        int destination = mc.player.getInventory().getSelectedSlot();
-        InvUtils.move().from(inventory.slot()).toHotbar(destination);
-        return InvUtils.findInHotbar(item);
+        for (int source = 9; source < 36; source++) {
+            if (!mc.player.getInventory().getStack(source).isOf(item)) continue;
+            int screenSlot = mc.player.playerScreenHandler.getSlotIndex(mc.player.getInventory(), source).orElse(-1);
+            if (screenSlot < 0) continue;
+            int destination = mc.player.getInventory().getSelectedSlot();
+            mc.interactionManager.clickSlot(mc.player.playerScreenHandler.syncId, screenSlot, destination, SlotActionType.SWAP, mc.player);
+            return findHotbarItem(item);
+        }
+        return new FindItemResult(-1, 0);
     }
 
     private PlacementPlan createPlacementPlan(BlockPos targetPos, BlockState requiredState, double range) {

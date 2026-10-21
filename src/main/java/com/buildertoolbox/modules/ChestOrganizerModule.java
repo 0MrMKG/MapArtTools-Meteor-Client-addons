@@ -1,7 +1,13 @@
 package com.buildertoolbox.modules;
 
 import com.buildertoolbox.BuilderToolboxAddon;
+import com.buildertoolbox.utils.AutomationControl;
+import com.buildertoolbox.utils.OrganizerJournal;
 import com.buildertoolbox.utils.StorageBlockUtils;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -10,9 +16,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.HexFormat;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.meteor.KeyEvent;
 import meteordevelopment.meteorclient.events.meteor.MouseClickEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.gui.GuiThemes;
@@ -37,6 +46,8 @@ import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.s2c.play.InventoryS2CPacket;
+import net.minecraft.network.packet.s2c.play.ScreenHandlerSlotUpdateS2CPacket;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
@@ -48,13 +59,14 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.WorldSavePath;
 import org.lwjgl.glfw.GLFW;
 
 /** Moves misplaced stacks between item-frame/sign-labeled containers. */
 public final class ChestOrganizerModule extends Module {
     private static final Direction[] HORIZONTAL = { Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST };
     private static final int OPEN_WAIT_TICKS = 12;
-    private static final int TRANSFER_WAIT_TICKS = 12;
+    private static final int TRANSFER_WAIT_TICKS = 8;
 
     private final SettingGroup sgStorage = settings.createGroup("Storage");
     private final Setting<Boolean> selectChests = sgStorage.add(new BoolSetting.Builder()
@@ -95,10 +107,6 @@ public final class ChestOrganizerModule extends Module {
     private BlockPos stand;
     private BlockPos navigationGoal;
     private Item depositItem;
-    private Item transferItem;
-    private boolean extractingTransfer;
-    private int transferSlot;
-    private int transferBefore;
     private int transferFailures;
     private int pathIndex;
     private int routeFailures;
@@ -114,6 +122,18 @@ public final class ChestOrganizerModule extends Module {
     private double bestStepDistance = Double.POSITIVE_INFINITY;
     private boolean ownsForward;
     private boolean updatingList;
+    private boolean ownsAutomation;
+    private boolean restoringTransfer;
+    private boolean needsCargoCheck;
+    private OrganizerJournal journal;
+    private String journalWorld, journalDimension, journalPlayer;
+    private OrganizerJournal.Pending pendingTransfer;
+    private ScreenHandler ownedContainer;
+    private long ownedAt;
+    private long inventorySequence;
+    private long transferSequence;
+    private final ConcurrentLinkedQueue<InventoryUpdate> inventoryUpdates = new ConcurrentLinkedQueue<>();
+    private final Map<Integer, ServerInventory> serverInventories = new HashMap<>();
     private String activity = "空闲";
 
     public ChestOrganizerModule() {
@@ -123,11 +143,14 @@ public final class ChestOrganizerModule extends Module {
 
     @Override
     public void onActivate() {
-        resetRuntime();
         if (mc.player == null || mc.world == null) { disable(); return; }
+        if (!AutomationControl.acquire(this)) { disable(); return; }
+        ownsAutomation = true;
+        resetRuntime();
         if (labels.isEmpty() && !chestList.get().isEmpty()) restoreChestList(chestList.get());
         if (overflowChest == null && !overflowChestList.get().isEmpty()) restoreOverflowChest(overflowChestList.get());
         walkY = mc.player.getBlockPos().getY();
+        if (!restoreCargo()) return;
         if (selectChests.get() || selectOverflow.get()) {
             state = State.REGISTERING;
             activity = "右键登记箱子，Esc 返回设置";
@@ -137,6 +160,9 @@ public final class ChestOrganizerModule extends Module {
         } else if (overflowConflictsWithLabel()) {
             state = State.PAUSED;
             warning("杂物箱与分类箱不能是同一只；请重新指定杂物箱。", new Object[0]);
+        } else if (pendingTransfer != null || !cargo.isEmpty()) {
+            state = State.DEPOSITING;
+            activity = "恢复已保存的待归类物品，先核对服务器库存";
         } else if (hasInitialSortItems()) {
             state = State.PAUSED;
             warning("背包里已有登记颜色的物品。请先移走这些物品再启动，避免误存玩家原有物品。", new Object[0]);
@@ -148,26 +174,58 @@ public final class ChestOrganizerModule extends Module {
 
     @Override
     public void onDeactivate() {
+        if (!ownsAutomation) return;
+        saveCargo();
         if (!cargo.isEmpty()) warning("整理已停止；尚有 %d 种待归类物品留在背包中。", cargo.size());
         closeChest();
         releaseMovement();
         if (selectChests.get()) selectChests.set(false);
         if (selectOverflow.get()) selectOverflow.set(false);
         resetRuntime();
+        ownsAutomation = false;
+        AutomationControl.release(this);
     }
 
     @EventHandler
     private void onGameLeft(GameLeftEvent event) { disable(); }
 
     @EventHandler
+    private void onInventory(PacketEvent.Receive event) {
+        if (event.packet instanceof InventoryS2CPacket packet) {
+            inventoryUpdates.add(new InventoryUpdate(packet.syncId(), -1,
+                packet.contents().stream().map(ItemStack::copy).toList(), ItemStack.EMPTY));
+        } else if (event.packet instanceof ScreenHandlerSlotUpdateS2CPacket packet) {
+            inventoryUpdates.add(new InventoryUpdate(packet.getSyncId(), packet.getSlot(), List.of(), packet.getStack().copy()));
+        }
+    }
+
+    @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) { disable(); return; }
         tick++;
+        receiveInventoryUpdates();
         if (state == State.REGISTERING || state == State.PAUSED) { releaseMovement(); return; }
+        if (!mc.world.getRegistryKey().getValue().toString().equals(journalDimension)) {
+            pause("已切换维度；整理进度仍保存在原维度，返回后重新开启继续");
+            return;
+        }
         if (mc.currentScreen != null && currentContainer() == null) {
             releaseMovement();
             activity = "检测到其他界面，已暂停操作";
             return;
+        }
+        if (pendingTransfer != null) { tickTransfer(); return; }
+        if (needsCargoCheck) {
+            // Reopen a registered chest to obtain a complete authoritative player inventory.
+            if (activeChest == null) selectChest(labels.keySet().stream().min(Comparator.comparingDouble(this::distanceToPlayer)).orElse(null));
+            if (state == State.PAUSED || activeChest == null) return;
+            ScreenHandler opened = tickOpenChest();
+            if (opened == null) return;
+            if (!validateCargo(serverInventory(opened))) return;
+            needsCargoCheck = false;
+            closeChest();
+            clearChest();
+            if (!cargo.isEmpty()) beginDeposit();
         }
         if (state == State.EXTRACTING) tickExtract();
         else tickDeposit();
@@ -187,7 +245,6 @@ public final class ChestOrganizerModule extends Module {
         }
         ScreenHandler opened = tickOpenChest();
         if (opened == null) return;
-        if (tickTransfer()) return;
         if (!labelStillMatches(activeChest)) { skipSource("标签已变化"); return; }
 
         int containerSlots = containerSlots(opened);
@@ -195,7 +252,7 @@ public final class ChestOrganizerModule extends Module {
         boolean hasUnmapped = false;
         Item expected = labels.get(activeChest);
         for (int slot = 0; slot < containerSlots; slot++) {
-            ItemStack stack = opened.getSlot(slot).getStack();
+            ItemStack stack = serverInventory(opened).stacks.get(slot);
             if (stack.isEmpty() || stack.isOf(expected) || rejectedSourceSlots.contains(slot)) continue;
             Item item = stack.getItem();
             if (countInventory(item) > cargo.getOrDefault(item, 0)) {
@@ -205,13 +262,7 @@ public final class ChestOrganizerModule extends Module {
                 continue;
             }
             if (inventoryCapacity(stack) < stack.getCount()) { needsRoom = true; continue; }
-            transferItem = item;
-            transferBefore = countInventory(item);
-            transferSlot = slot;
-            extractingTransfer = true;
-            InvUtils.shiftClick().slotId(slot);
-            transferTick = tick;
-            activity = "取出错放的 " + item.getName().getString();
+            if (beginTransfer(opened, slot, item, true)) activity = "取出错放的 " + item.getName().getString();
             return;
         }
         if (needsRoom) {
@@ -258,7 +309,6 @@ public final class ChestOrganizerModule extends Module {
         }
         ScreenHandler opened = tickOpenChest();
         if (opened == null) return;
-        if (tickTransfer()) return;
         if (!activeChest.equals(overflowChest)
             && (!labelStillMatches(activeChest) || !depositItem.equals(labels.get(activeChest)))) {
             nextDestination();
@@ -268,67 +318,138 @@ public final class ChestOrganizerModule extends Module {
         int containerSlots = containerSlots(opened);
         Identifier wanted = Registries.ITEM.getId(depositItem);
         for (int slot = containerSlots; slot < opened.slots.size(); slot++) {
-            ItemStack stack = opened.getSlot(slot).getStack();
+            ItemStack stack = serverInventory(opened).stacks.get(slot);
             if (stack.isEmpty() || !wanted.equals(Registries.ITEM.getId(stack.getItem()))) continue;
             if (stack.getCount() > cargo.getOrDefault(depositItem, 0)) {
                 pause("当前物品组包含玩家原有物品，已停止以免误存");
                 return;
             }
-            transferItem = depositItem;
-            transferBefore = countInventory(depositItem);
-            transferSlot = slot;
-            extractingTransfer = false;
-            InvUtils.shiftClick().slotId(slot);
-            transferTick = tick;
-            activity = "归类 " + depositItem.getName().getString();
+            if (beginTransfer(opened, slot, depositItem, false)) activity = "归类 " + depositItem.getName().getString();
             return;
         }
-        if (countInventory(depositItem) == 0) cargo.remove(depositItem);
+        if (countInventory(depositItem) == 0) {
+            if (cargo.getOrDefault(depositItem, 0) > 0) pause("待归类物品与背包不一致，保留账本等待核对");
+        }
         else nextDestination();
     }
 
-    /** Wait for the server inventory update before issuing another click. */
-    private boolean tickTransfer() {
-        if (transferTick < 0) return false;
-        int now = countInventory(transferItem);
-        int moved = extractingTransfer ? now - transferBefore : transferBefore - now;
-        if (moved > 0) {
-            if (extractingTransfer) cargo.merge(transferItem, moved, Integer::sum);
-            else cargo.computeIfPresent(transferItem, (item, amount) -> amount > moved ? amount - moved : null);
+    private boolean beginTransfer(ScreenHandler opened, int slot, Item item, boolean extracting) {
+        ServerInventory inventory = serverInventory(opened);
+        int before = inventoryCount(inventory, item, true, containerSlots(opened));
+        if (before != cargo.getOrDefault(item, 0) || before != countInventory(item)) {
+            pause("服务器库存与整理账本不一致，已保留物品等待核对");
+            return false;
+        }
+        ItemStack actual = inventory.stacks.get(slot);
+        ItemStack displayed = opened.getSlot(slot).getStack();
+        if (actual.getCount() != displayed.getCount() || !ItemStack.areItemsAndComponentsEqual(actual, displayed)) {
+            reopenForTransfer();
+            return false;
+        }
+        pendingTransfer = new OrganizerJournal.Pending(position(activeChest), Registries.ITEM.getId(item).toString(),
+            extracting, slot, before, inventoryCount(inventory, item, false, containerSlots(opened)),
+            cargo.getOrDefault(item, 0), actual.getCount());
+        // The durable intent must precede the client-predicted shift-click.
+        if (!saveCargo()) return false;
+        transferSequence = inventory.sequence;
+        transferTick = tick;
+        restoringTransfer = false;
+        InvUtils.shiftClick().slotId(slot);
+        return true;
+    }
+
+    /** Only server packet snapshots may commit a predicted transfer to the cargo ledger. */
+    private void tickTransfer() {
+        OrganizerJournal.Pending pending = pendingTransfer;
+        if (activeChest == null) selectChest(parsePosition(pending.chest()));
+        if (state == State.PAUSED || activeChest == null) return;
+        ScreenHandler opened = tickOpenChest();
+        if (opened == null) return;
+        ServerInventory inventory = serverInventory(opened);
+        Item item = Registries.ITEM.get(Identifier.of(pending.item()));
+        int actual = inventoryCount(inventory, item, true, containerSlots(opened));
+        int inContainer = inventoryCount(inventory, item, false, containerSlots(opened));
+        OrganizerJournal.Result result = OrganizerJournal.reconcile(pending, actual, inContainer);
+        if ((restoringTransfer || inventory.sequence > transferSequence) && result == OrganizerJournal.Result.CONFIRMED) {
+            int moved = Math.abs(actual - pending.playerBefore());
+            if (actual > 0) cargo.put(item, actual); else cargo.remove(item);
+            pendingTransfer = null;
             transferTick = -1;
             transferFailures = 0;
-            activity = (extractingTransfer ? "已取出 " : "已归类 ") + moved + " 个 " + transferItem.getName().getString();
-            return true;
-        }
-        if (tick - transferTick < TRANSFER_WAIT_TICKS) return true;
-        transferTick = -1;
-        if (++transferFailures >= 2) {
-            if (extractingTransfer) {
-                rejectedSourceSlots.add(transferSlot);
-                unresolved.add(activeChest);
-                warning("箱子 %s 的第 %d 格转移未确认，本轮跳过该格。", activeChest.toShortString(), transferSlot);
-            } else {
-                warning("目标箱 %s 无法收下 %s，尝试同物品的下一箱。",
-                    activeChest.toShortString(), transferItem.getName().getString());
-                nextDestination();
+            if (!saveCargo()) return;
+            activity = (pending.extracting() ? "服务器确认取出 " : "服务器确认归类 ") + moved + " 个 " + item.getName().getString();
+            if (needsCargoCheck) {
+                state = cargo.isEmpty() ? State.EXTRACTING : State.DEPOSITING;
             }
-            transferFailures = 0;
+            restoringTransfer = false;
+            return;
         }
-        return true;
+        if (restoringTransfer) {
+            if (result == OrganizerJournal.Result.AMBIGUOUS) {
+                pause("未完成转移的服务器库存与记录不一致，已保留物品和账本；请核对后恢复");
+                return;
+            }
+            // A newly opened full snapshot proves that this intent was not executed.
+            pendingTransfer = null;
+            transferTick = -1;
+            restoringTransfer = false;
+            if (!saveCargo()) return;
+            if (++transferFailures >= 2) {
+                if (pending.extracting()) {
+                    rejectedSourceSlots.add(pending.slot());
+                    unresolved.add(activeChest);
+                    warning("箱子 %s 的第 %d 格转移被服务器拒绝，本轮跳过。", activeChest.toShortString(), pending.slot());
+                } else {
+                    warning("目标箱 %s 无法收下 %s，尝试下一箱。", activeChest.toShortString(), item.getName().getString());
+                    nextDestination();
+                }
+                transferFailures = 0;
+            }
+            return;
+        }
+        if (tick - transferTick >= TRANSFER_WAIT_TICKS) reopenForTransfer();
+        else activity = "等待服务器确认物品转移";
+    }
+
+    private void reopenForTransfer() {
+        closeChest();
+        ownedContainer = null;
+        openTick = aimTick = -1;
+        openAttempts = 0;
+        serverInventories.clear();
+        inventoryUpdates.clear();
+        restoringTransfer = pendingTransfer != null;
+        activity = "重新打开箱子，核对服务器实际库存";
     }
 
     private ScreenHandler tickOpenChest() {
         ScreenHandler opened = currentContainer();
-        if (opened != null && (openTick < 0 || opened.syncId == previousSyncId)) {
-            mc.player.closeHandledScreen();
-            opened = null;
+        if (ownedContainer != null && opened != ownedContainer) {
+            ownedContainer = null;
+            openTick = aimTick = -1;
         }
-        if (opened == null && mc.currentScreen != null) {
+        if (opened != null && ownedContainer == null) {
+            if (openTick < 0 || opened.syncId == previousSyncId) {
+                releaseMovement();
+                activity = "等待其他箱子界面关闭；整理不会关闭玩家或其他功能的界面";
+                return null;
+            }
+            ownedContainer = opened;
+            ownedAt = tick;
+        }
+        if (opened == null && (mc.currentScreen != null || mc.player.currentScreenHandler != mc.player.playerScreenHandler)) {
             releaseMovement();
             activity = "请关闭当前界面后继续";
             return null;
         }
-        if (opened != null) { releaseMovement(); return opened; }
+        if (opened != null) {
+            releaseMovement();
+            ServerInventory inventory = serverInventory(opened);
+            if (inventory != null && inventory.stacks.size() == opened.slots.size() && tick - ownedAt >= 2) return opened;
+            if (tick - ownedAt > 100) pause("箱子已打开，但服务器未发送完整库存；保留进度等待恢复");
+            else activity = "等待服务器完整箱子库存";
+            return null;
+        }
         if (openTick >= 0 && tick - openTick < OPEN_WAIT_TICKS) {
             releaseMovement();
             activity = "等待箱子界面确认";
@@ -355,15 +476,17 @@ public final class ChestOrganizerModule extends Module {
             activity = "停稳后打开箱子";
             return null;
         }
-        if (openTick >= 0 && ++openAttempts >= 3) { chestUnreachable(); return null; }
         if (aimTick < 0 || tick - aimTick > 2) {
             faceToward(hit.getPos());
             aimTick = tick;
             activity = "正对箱子";
             return null;
         }
+        if (++openAttempts > 3) { chestUnreachable(); return null; }
         faceToward(hit.getPos());
         previousSyncId = mc.player.currentScreenHandler.syncId;
+        serverInventories.clear();
+        inventoryUpdates.clear();
         BlockUtils.interact(hit, Hand.MAIN_HAND, true);
         openTick = tick;
         aimTick = -1;
@@ -372,6 +495,7 @@ public final class ChestOrganizerModule extends Module {
     }
 
     private void selectChest(BlockPos chest) {
+        if (chest == null) { pause("没有登记可供核对库存的箱子"); return; }
         closeChest();
         clearChest();
         activeChest = chest.toImmutable();
@@ -390,9 +514,16 @@ public final class ChestOrganizerModule extends Module {
         openAttempts = 0;
         transferTick = -1;
         transferFailures = 0;
+        ownedContainer = null;
+        serverInventories.clear();
+        inventoryUpdates.clear();
     }
 
     private void chestUnreachable() {
+        if (pendingTransfer != null) {
+            pause("无法返回待确认转移的箱子，已保存转移记录；请恢复通路后重试");
+            return;
+        }
         if (state == State.EXTRACTING) {
             unreachable.add(activeChest);
             warning("无法打开来源箱 %s，本轮跳过。", activeChest.toShortString());
@@ -455,6 +586,7 @@ public final class ChestOrganizerModule extends Module {
     }
 
     private void pause(String reason) {
+        saveCargo();
         closeChest();
         releaseMovement();
         state = State.PAUSED;
@@ -490,6 +622,107 @@ public final class ChestOrganizerModule extends Module {
         return capacity;
     }
 
+    private boolean restoreCargo() {
+        journalWorld = mc.getServer() != null ? "local:" + mc.getServer().getSavePath(WorldSavePath.ROOT).toAbsolutePath()
+            : mc.getCurrentServerEntry() == null ? "unknown" : "server:" + mc.getCurrentServerEntry().address;
+        journalDimension = mc.world.getRegistryKey().getValue().toString();
+        journalPlayer = mc.player.getUuidAsString();
+        try {
+            String key = journalWorld + "\n" + journalDimension + "\n" + journalPlayer;
+            String hash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8)));
+            journal = new OrganizerJournal(mc.runDirectory.toPath().resolve("config/builder_toolbox/chest-organizer-" + hash + ".properties"));
+            if (journal.exists()) {
+                OrganizerJournal.State saved = journal.read();
+                if (!saved.world().equals(journalWorld) || !saved.dimension().equals(journalDimension) || !saved.player().equals(journalPlayer))
+                    throw new IOException("整理进度所属存档、维度或玩家不同");
+                for (var entry : saved.cargo().entrySet()) {
+                    Identifier id = Identifier.tryParse(entry.getKey());
+                    Item item = id == null ? Items.AIR : Registries.ITEM.get(id);
+                    if (item == Items.AIR) throw new IOException("整理记录中的物品不存在：" + entry.getKey());
+                    cargo.put(item, entry.getValue());
+                }
+                pendingTransfer = saved.pending();
+                if (pendingTransfer != null) {
+                    Identifier id = Identifier.tryParse(pendingTransfer.item());
+                    if (id == null || Registries.ITEM.get(id) == Items.AIR || parsePosition(pendingTransfer.chest()) == null)
+                        throw new IOException("未完成转移的物品或箱子坐标无效");
+                }
+                if (!cargo.isEmpty() || pendingTransfer != null) {
+                    walkY = saved.walkY();
+                    restoringTransfer = pendingTransfer != null;
+                    needsCargoCheck = true;
+                    info("已恢复整理记录：%d 种待归类物品%s。先核对服务器库存，再回存。",
+                        cargo.size(), pendingTransfer == null ? "" : "，1 次待确认转移");
+                }
+            }
+            return true;
+        } catch (IOException | NoSuchAlgorithmException | RuntimeException exception) {
+            journal = null; // Never overwrite a corrupt or incompatible ledger.
+            state = State.PAUSED;
+            activity = "整理进度读取失败：" + exception.getMessage();
+            warning("%s", activity);
+            return false;
+        }
+    }
+
+    private boolean saveCargo() {
+        if (journal == null) return false;
+        Map<String, Integer> savedCargo = new HashMap<>();
+        cargo.forEach((item, count) -> savedCargo.put(Registries.ITEM.getId(item).toString(), count));
+        try {
+            journal.write(new OrganizerJournal.State(journalWorld, journalDimension, journalPlayer, walkY, savedCargo, pendingTransfer));
+            return true;
+        } catch (IOException | RuntimeException exception) {
+            releaseMovement();
+            state = State.PAUSED;
+            activity = "整理进度保存失败，已停止物品操作：" + exception.getMessage();
+            warning("%s", activity);
+            return false;
+        }
+    }
+
+    private boolean validateCargo(ServerInventory inventory) {
+        for (var entry : cargo.entrySet()) {
+            if (inventoryCount(inventory, entry.getKey(), true, containerSlots(ownedContainer)) != entry.getValue()) {
+                pause("背包中的待归类物品与已保存记录不一致；不会把玩家原有物品当作整理任务物品");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void receiveInventoryUpdates() {
+        InventoryUpdate update;
+        while ((update = inventoryUpdates.poll()) != null) {
+            if (update.slot < 0) {
+                serverInventories.put(update.syncId, new ServerInventory(new ArrayList<>(update.contents), ++inventorySequence));
+            } else {
+                ServerInventory inventory = serverInventories.get(update.syncId);
+                if (inventory != null && update.slot < inventory.stacks.size()) {
+                    inventory.stacks.set(update.slot, update.stack);
+                    inventory.sequence = ++inventorySequence;
+                }
+            }
+        }
+    }
+
+    private ServerInventory serverInventory(ScreenHandler handler) {
+        return handler == null ? null : serverInventories.get(handler.syncId);
+    }
+
+    private static int inventoryCount(ServerInventory inventory, Item item, boolean player, int containerSlots) {
+        int result = 0;
+        int first = player ? containerSlots : 0;
+        int end = player ? Math.min(inventory.stacks.size(), containerSlots + 36) : containerSlots;
+        for (int slot = first; slot < end; slot++) {
+            ItemStack stack = inventory.stacks.get(slot);
+            if (stack.isOf(item)) result += stack.getCount();
+        }
+        return result;
+    }
+
+    private static String position(BlockPos pos) { return pos.getX() + "," + pos.getY() + "," + pos.getZ(); }
+
     private void onSelectChestsChanged(boolean enabled) {
         if (!enabled) return;
         if (selectOverflow.get()) selectOverflow.set(false);
@@ -504,17 +737,24 @@ public final class ChestOrganizerModule extends Module {
 
     private void enterRegistration() {
         if (!isActive()) toggle();
+        if (!isActive()) {
+            if (selectChests.get()) selectChests.set(false);
+            if (selectOverflow.get()) selectOverflow.set(false);
+            return;
+        }
         else if (state != State.REGISTERING) {
             closeChest();
             releaseMovement();
             state = State.REGISTERING;
         }
-        if (mc.player != null) mc.setScreen(null);
+        if (mc.player != null && mc.player.currentScreenHandler == mc.player.playerScreenHandler) mc.setScreen(null);
+        else activity = "请先关闭当前箱子，再右键登记位置";
     }
 
     @EventHandler
     private void onMouseClick(MouseClickEvent event) {
         if (!isActive() || state != State.REGISTERING || mc.player == null || mc.world == null
+            || mc.currentScreen != null
             || event.action != KeyAction.Press || event.button() != GLFW.GLFW_MOUSE_BUTTON_RIGHT) return;
         event.cancel();
         if (!(mc.crosshairTarget instanceof BlockHitResult hit) || !isContainer(hit.getBlockPos())) {
@@ -551,6 +791,7 @@ public final class ChestOrganizerModule extends Module {
     private void onKey(KeyEvent event) {
         if (!isActive() || state != State.REGISTERING || event.action != KeyAction.Press
             || event.key() != GLFW.GLFW_KEY_ESCAPE) return;
+        if (mc.player != null && mc.player.currentScreenHandler != mc.player.playerScreenHandler) return;
         event.cancel();
         if (selectChests.get()) selectChests.set(false);
         if (selectOverflow.get()) selectOverflow.set(false);
@@ -628,13 +869,20 @@ public final class ChestOrganizerModule extends Module {
         if (!enabled) return;
         resumeSorting.set(false);
         if (!isActive() || state != State.PAUSED || mc.player == null || mc.world == null) return;
+        if (journal == null || !mc.world.getRegistryKey().getValue().toString().equals(journalDimension)) {
+            warning("请返回原维度并重新开启模块，以重新读取整理记录。", new Object[0]);
+            return;
+        }
         if (labels.isEmpty() || overflowConflictsWithLabel()) {
             warning("请先修正分类箱和杂物箱的登记。", new Object[0]);
             return;
         }
-        if (!cargo.isEmpty()) {
+        if (pendingTransfer != null || !cargo.isEmpty()) {
             depositItem = null;
             triedDestinations.clear();
+            needsCargoCheck = true;
+            restoringTransfer = pendingTransfer != null;
+            clearChest();
             state = State.DEPOSITING;
         } else {
             if (hasInitialSortItems()) {
@@ -731,7 +979,8 @@ public final class ChestOrganizerModule extends Module {
     }
 
     private void closeChest() {
-        if (mc.player != null && currentContainer() != null) mc.player.closeHandledScreen();
+        if (mc.player != null && ownedContainer != null && mc.player.currentScreenHandler == ownedContainer
+            && ownedContainer.getCursorStack().isEmpty()) mc.player.closeHandledScreen();
     }
 
     private BlockHitResult findContainerHit(BlockPos pos, Vec3d eye) {
@@ -884,7 +1133,14 @@ public final class ChestOrganizerModule extends Module {
         activeChest = null;
         stand = null;
         depositItem = null;
-        transferItem = null;
+        pendingTransfer = null;
+        restoringTransfer = false;
+        needsCargoCheck = false;
+        ownedContainer = null;
+        journal = null;
+        serverInventories.clear();
+        inventoryUpdates.clear();
+        inventorySequence = transferSequence = 0;
         transferTick = -1;
         openTick = -1;
         aimTick = -1;
@@ -896,4 +1152,11 @@ public final class ChestOrganizerModule extends Module {
 
     private enum State { REGISTERING, EXTRACTING, DEPOSITING, PAUSED }
     private enum RouteResult { MOVING, ARRIVED, UNREACHABLE }
+
+    private record InventoryUpdate(int syncId, int slot, List<ItemStack> contents, ItemStack stack) { }
+    private static final class ServerInventory {
+        private final List<ItemStack> stacks;
+        private long sequence;
+        private ServerInventory(List<ItemStack> stacks, long sequence) { this.stacks = stacks; this.sequence = sequence; }
+    }
 }

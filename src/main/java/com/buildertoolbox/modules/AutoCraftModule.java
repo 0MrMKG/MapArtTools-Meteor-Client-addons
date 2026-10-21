@@ -1,5 +1,7 @@
 package com.buildertoolbox.modules;
 
+import com.buildertoolbox.utils.AutomationControl;
+
 import com.buildertoolbox.BuilderToolboxAddon;
 import com.buildertoolbox.utils.CraftingBatchPlan;
 import com.buildertoolbox.utils.StorageBlockUtils;
@@ -105,6 +107,7 @@ public final class AutoCraftModule extends Module {
     @Override
     public void onActivate() {
         if (mc.player == null || mc.world == null) { disable(); return; }
+        if (!AutomationControl.acquire(this)) { disable(); return; }
         tick = 0;
         access.start(mc.player.getBlockPos().getY());
         pending = null;
@@ -125,6 +128,7 @@ public final class AutoCraftModule extends Module {
         if (selectStorage.get()) selectStorage.set(false);
         if (selectTable.get()) selectTable.set(false);
         if (source != null) warning("自动合成已停止；携带的配方材料仍属于 %s。再次开启可继续处理并回存原箱。", source.toShortString());
+        AutomationControl.release(this);
     }
 
     @EventHandler
@@ -137,7 +141,10 @@ public final class AutoCraftModule extends Module {
 
     private void onResumeChanged(boolean enabled) {
         if (!enabled) return;
-        if (!isActive()) toggle();
+        if (!isActive()) {
+            toggle();
+            if (!isActive()) { resume.set(false); return; }
+        }
         else if (state != State.SELECTING) beginRun();
         resume.set(false);
     }
@@ -545,6 +552,7 @@ public final class AutoCraftModule extends Module {
         if (crafting && selectStorage.get()) selectStorage.set(false);
         if (!crafting && selectTable.get()) selectTable.set(false);
         if (!isActive()) toggle();
+        if (!isActive()) return;
         access.reset();
         pending = null;
         state = State.SELECTING;

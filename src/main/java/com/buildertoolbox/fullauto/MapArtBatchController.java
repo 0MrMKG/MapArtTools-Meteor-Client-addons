@@ -55,16 +55,30 @@ public final class MapArtBatchController {
         void batchPrepare(BatchPainting painting);
         String batchPreflight();
         void batchStartDrawing();
+        BatchPrintCheckpoint batchDrawingCheckpoint();
+        void batchResumeDrawing(BatchPrintCheckpoint checkpoint);
+        void batchRestoreReviewContext(BatchPrintCheckpoint checkpoint);
         void batchStopWorker();
         boolean batchPlacementPending();
-        boolean batchReadyForReview();
+        boolean batchWorkSweepFinished();
         void batchHoldForReview();
+        boolean batchOwnsContainer();
+        boolean batchCursorStorageAllowed(ItemStack stack);
+        boolean batchFreeCursorSpace();
+        void batchCursorRecovered();
+        boolean batchReturnAfterCursorRecovery();
+        void batchBeginReviewRepairs(int pass);
+        boolean batchRepairNearby();
+        boolean batchRepairEligible(BlockPos pos);
+        boolean batchRepairTarget(BlockPos pos);
+        void batchObserveBlock(BlockPos pos);
         int batchReviewWidth();
         boolean batchReviewReverse();
-        int batchRemaining();
+        int batchReviewOriginX();
+        int batchReviewOriginZ();
+        int batchAllowedMissingBlocks();
         int batchLane();
         boolean batchWorkerPaused();
-        void batchRetryDrawing(int errors);
         void batchPauseWorker(String reason);
         void batchStatus(String text);
         void batchMessage(String text);
@@ -77,10 +91,12 @@ public final class MapArtBatchController {
     private final MinecraftClient mc;
     private final BatchWorkstationAccess access;
     private final BatchJournal journal;
+    private final CursorRecovery cursorRecovery;
     private final AtomicLong blockVersion = new AtomicLong();
     private final ConcurrentHashMap<BlockPos,LeverAck> leverAcks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer,Boolean> lockedMaps = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<BlockPos,BlockState> serverBlocks = new ConcurrentHashMap<>();
+    private final AtomicLong canvasRevision = new AtomicLong();
     private volatile BlockPos watchedLever;
     private BatchJournal.State job;
     private Configuration config;
@@ -89,32 +105,66 @@ public final class MapArtBatchController {
     private Path folder;
     private boolean running;
     private boolean resuming;
+    private boolean runtimeRestored;
     private boolean restoringLever;
-    private long tick, actionAt=-1, actionAckBefore, waitStarted=-1, lastVerification=-100, captureStarted=-1;
-    private int errors=-1, lastLane=Integer.MIN_VALUE;
-    private int fetchAttempts, lockInputAttempts, lockAttempts, depositAttempts;
+    private long tick, actionAt=-1, actionAckBefore, waitStarted=-1, captureStarted=-1;
+    private int errors=-1;
+    private int fetchAttempts, lockInputAttempts, lockAttempts, depositAttempts, mapSwapAttempts;
     private BatchInspection inspection;
     private int inspectionWaypoint;
+    private BlockPos inspectionResume;
+    private BlockPos inspectionRepairTarget;
+    private final Set<BlockPos> inspectionDeferred = new HashSet<>();
+    private int canvasScanIndex;
+    private long scanStartRevision, completedScanRevision = -1;
+    private long clockNanos = -1, lastSavedNanos;
+    private long drawingSavedAt;
+    private IOException stopSaveFailure;
     private String status="尚未开始";
 
     public MapArtBatchController(Host host,MinecraftClient mc) {
-        this.host=host;this.mc=mc;access=new BatchWorkstationAccess(mc);
+        this.host=host;this.mc=mc;access=new BatchWorkstationAccess(mc);cursorRecovery=new CursorRecovery(mc);
         journal=new BatchJournal(FabricLoader.getInstance().getConfigDir().resolve("builder_toolbox/fullauto-batch.properties"));
     }
     public boolean running() { return running; }
+    public BlockState observedBlock(BlockPos pos) { return serverBlocks.getOrDefault(pos, mc.world.getBlockState(pos)); }
+    public void watchPlacement(BlockPos pos) {
+        serverBlocks.putIfAbsent(pos.toImmutable(), mc.world.getBlockState(pos));
+        canvasRevision.incrementAndGet();
+    }
+    public void rememberCursorOrigin(ScreenHandler handler,int slot) { cursorRecovery.rememberOrigin(handler,slot); }
     public boolean printing() { return running&&job!=null&&job.phase==Phase.PRINT; }
-    public int reservedSlots() { return printing()?2:0; }
+    public int reservedSlots() { return running&&job!=null&&(job.phase==Phase.PRINT||job.phase==Phase.REVIEW)?2:0; }
     public String status() { return prefix()+status; }
+    public String stageStatus() { return status; }
+    public String queueDescription() { return prefix().trim(); }
+    public String elapsedStatus() {
+        long millis=job==null?0:job.elapsedMillis;
+        if(running&&clockNanos>=0)millis+=Math.max(0,System.nanoTime()-clockNanos)/1_000_000L;
+        return "批次累计运行 " + MapArtProgressTimer.duration(millis/1000);
+    }
+    public String queueProgress() {
+        if(job==null||job.queue.isEmpty())return "地图画队列尚未读取";
+        return "地图画 第 " + Math.min(job.index+1,job.queue.size()) + " / " + job.queue.size() + " 张";
+    }
     public boolean hidesScreen(Screen screen) { return access.hidesScreen(screen); }
     public boolean closingMenu() { return access.closingMenu(); }
+    public boolean allowsAutoEat() {
+        if(!running||job==null||resuming||discovery!=null||access.busyForAutoEat())return false;
+        return switch(job.phase) {
+            case LOAD,PRINT,REVIEW,WAIT_ON_1,WAIT_OFF_1,WAIT_ON_2,WAIT_OFF_2,CLEAR_BUFFER,CHECK_CLEAR -> true;
+            case CLEAR_ON_1,CLEAR_OFF_1,CLEAR_ON_2,CLEAR_OFF_2 -> !job.leverIssued;
+            default -> false; // Do not interrupt map activation, cartography or product transactions.
+        };
+    }
+    public void holdForAutoEat() { access.release(tick); }
 
     public void startOrResume() {
         stop();
-        fetchAttempts=lockInputAttempts=lockAttempts=depositAttempts=0;
+        fetchAttempts=lockInputAttempts=lockAttempts=depositAttempts=mapSwapAttempts=0;
         if(mc.player==null||mc.world==null)return;
         try {
             config=host.batchConfiguration();config.validate();
-            if(!mc.player.currentScreenHandler.getCursorStack().isEmpty())throw new IOException("请先放回鼠标持有的物品");
             folder=BatchFiles.directory(DataManager.getSchematicsBaseDirectory(),config.folder());
             watchedLever=config.lever();
             if(journal.exists()) {
@@ -138,28 +188,75 @@ public final class MapArtBatchController {
                 });
                 running=true;host.batchStopWorker();status="读取目录与文件指纹";
             }
-            actionAt=-1;waitStarted=-1;lastLane=Integer.MIN_VALUE;
+            actionAt=-1;waitStarted=-1;
             status=job==null?"读取队列":"恢复阶段："+job.phase;
             host.batchMessage("全自动批次开始/恢复："+config.folder());
         } catch(Exception exception) {pause(message(exception));}
     }
 
     public void stop() {
-        if(discovery!=null){discovery.cancel(true);discovery=null;}
-        if(running&&job!=null)try{journal.write(job);}catch(IOException exception){host.batchMessage("保存进度失败："+exception.getMessage());}
-        running=false;resuming=false;access.reset();actionAt=-1;waitStarted=-1;
-        serverBlocks.clear();leverAcks.clear();lockedMaps.clear();
-        inspection=null;inspectionWaypoint=0;
+        if(running&&job!=null&&!resuming)try{captureDrawing();save();}catch(IOException exception){stopSaveFailure=exception;host.batchMessage("保存进度失败："+exception.getMessage());}
+        stopRuntime();
     }
 
-    public void reset() {
-        stop();
+    private void stopRuntime() {
+        if(discovery!=null){discovery.cancel(true);discovery=null;}
+        running=false;resuming=false;access.reset();actionAt=-1;waitStarted=-1;
+        runtimeRestored=false;captureStarted=-1;
+        clockNanos=-1;
+        serverBlocks.clear();leverAcks.clear();lockedMaps.clear();
+        inspection=null;inspectionWaypoint=0;inspectionResume=null;
+        inspectionRepairTarget=null;inspectionDeferred.clear();canvasScanIndex=0;completedScanRevision=-1;
+        cursorRecovery.reset();
+    }
+
+    public boolean reset() {
+        BatchJournal.State existing=null;
         try {
-            if(job!=null&&mc.player!=null&&(findMap(job.rawMap)>=0||findMap(job.lockedMap)>=0))
-                throw new IOException("本轮地图仍在背包，请先继续锁定/入箱后再重置，避免遗失归属");
-            journal.archive();job=null;painting=null;status="批次已重置，旧记录保留为 .previous";
+            // Unlike ordinary stop(), initialization must fail if saving the
+            // latest authoritative phase fails; never archive an older phase.
+            if(stopSaveFailure!=null)throw new IOException("最近一次停止时保存失败，尚不能安全初始化；请先恢复并成功保存当前批次",stopSaveFailure);
+            if(running&&runtimeRestored&&job!=null&&!resuming&&discovery==null){captureDrawing();save();}
+            existing=journal.exists()?journal.read():job;
+            String before=resetOwnershipProblem(existing);
+            stopRuntime();host.batchStopWorker();
+            if(before!=null)throw new IOException(before);
+            // Closing our cartography/container screen may return its inputs.
+            // Check again after releasing it before archiving ownership data.
+            String after=resetOwnershipProblem(existing);
+            if(after!=null)throw new IOException(after);
+            journal.archive();job=null;painting=null;status="批次已重新初始化；最新旧记录保留为 .previous，更早归档保留为独立 .bak";
             host.batchPauseWorker(status);
-        }catch(IOException exception){pause(exception.getMessage());}
+            return true;
+        }catch(Exception exception){
+            stopRuntime();host.batchStopWorker();
+            if(existing!=null)job=existing;
+            status="初始化未执行，原进度已保留："+message(exception);
+            host.batchPauseWorker(status);host.batchMessage(status);
+            return false;
+        }
+    }
+
+    private String resetOwnershipProblem(BatchJournal.State existing) {
+        String transaction=BatchJournal.resetTransactionProblem(existing);
+        if(transaction!=null||existing==null||existing.phase==Phase.NEXT||existing.phase==Phase.DONE)return transaction;
+        if(existing.rawMap<0&&existing.lockedMap<0)return null;
+        if(mc.player==null||mc.world==null)return "请进入原批次所在世界核对本轮地图，再重新初始化";
+        // Map IDs are world-local: another save/dimension can have the same ID.
+        if(!existing.world.equals(world())||!existing.dimension.equals(dimension()))return null;
+        for(int slot=0;slot<36;slot++)if(ownsMap(existing,mc.player.getInventory().getStack(slot)))
+            return "本轮地图仍在背包，请先恢复完成锁定/入箱，再重新初始化";
+        if(ownsMap(existing,mc.player.getOffHandStack())||ownsMap(existing,mc.player.currentScreenHandler.getCursorStack())
+            ||ownsMap(existing,mc.player.playerScreenHandler.getCursorStack()))
+            return "本轮地图仍在副手或鼠标上，请先恢复完成入箱，再重新初始化";
+        for(var slot:mc.player.currentScreenHandler.slots)if(ownsMap(existing,slot.getStack()))
+            return "当前容器或制图台仍有本轮地图，请先恢复确认产物入箱，再重新初始化";
+        return null;
+    }
+
+    private boolean ownsMap(BatchJournal.State existing,ItemStack stack) {
+        int id=mapId(stack);
+        return id>=0&&(id==existing.rawMap||id==existing.lockedMap);
     }
 
     /** Returns true when the workflow owns this tick; false lets the snake worker tick. */
@@ -169,27 +266,71 @@ public final class MapArtBatchController {
         try {
             if(!config.signature().equals(host.batchConfiguration().signature()))throw new IOException("位置、目录或颜色筛选已改变，已暂停；恢复原配置后可续作");
             if(job!=null&&(!job.world.equals(world())||!job.dimension.equals(dimension())))throw new IOException("服务器/存档或维度发生变化");
-            if(!mc.player.currentScreenHandler.getCursorStack().isEmpty())throw new IOException("鼠标持有物品，已暂停；请放回物品后继续");
+            access.claimPendingHandler(tick);checkAccess();
+            if(cursorRecovery.tick(mc.player.currentScreenHandler==mc.player.playerScreenHandler
+                ||access.owns(mc.player.currentScreenHandler)||host.batchOwnsContainer(),this::cursorStorageAllowed,host::batchCursorStorageAllowed)) {
+                access.release(tick);host.batchHoldForReview();report(cursorRecovery.status());return true;
+            }
+            if(cursorRecovery.needsSpace()&&!mc.player.currentScreenHandler.getCursorStack().isEmpty()) {
+                access.release(tick);host.batchHoldForReview();
+                boolean freeing=job!=null&&(job.phase==Phase.PRINT||job.phase==Phase.REVIEW)
+                    &&mc.player.currentScreenHandler==mc.player.playerScreenHandler&&host.batchFreeCursorSpace();
+                report(freeing?"正在安全铺设已有材料，为鼠标物品腾出空间"
+                    :"附近暂无可安全腾出的槽位：请清出一个背包格，腾出后自动继续");return true;
+            }
+            if(cursorRecovery.consumeRecovered()) {
+                host.batchCursorRecovered();
+                access.resetTravel();
+                host.batchMessage("已安全收回鼠标物品，继续当前步骤");
+                if(job!=null&&(job.phase==Phase.FETCH_MAP||job.phase==Phase.FETCH_GLASS
+                    ||job.phase==Phase.STORE||job.phase==Phase.STORE_PENDING))access.reset();
+            }
+            boolean resumeTable=job!=null&&(job.phase==Phase.LOCK||job.phase==Phase.TAKE_LOCKED)
+                &&access.recoveryMatches(config.table(),true);
+            if(!resumeTable&&!access.closeRecoveryHandlerIfSafe()) {report("先前自有界面仍有需要保留的物品，等待安全续作");return true;}
+            if(host.batchReturnAfterCursorRecovery()) {access.release(tick);report("鼠标物品已收回，返回原工作位置");return true;}
             if(discovery!=null) {
                 if(!discovery.isDone()){report("读取目录与文件指纹");return true;}
                 List<BatchFiles.Entry> files=discovery.join();discovery=null;
                 if(resuming) {
                     resuming=false;loadPainting();job.pause="";
                     restoringLever=job.leverIssued;
-                    if(BatchWorkflowRules.leverWait(job.phase))job.deadline=System.currentTimeMillis()+20000;
+                    if(BatchWorkflowRules.leverWait(job.phase))
+                        job.deadline=System.currentTimeMillis()+(job.waitRemainingMillis>=0?job.waitRemainingMillis:20000);
                     if(job.phase==Phase.CLEAR_BUFFER||job.phase==Phase.CHECK_CLEAR) {
                         job.phase=Phase.CLEAR_BUFFER;
-                        job.deadline=System.currentTimeMillis()+BatchWorkflowRules.CLEAR_BUFFER_MILLIS;
+                        job.deadline=System.currentTimeMillis()+(job.waitRemainingMillis>=0
+                            ?Math.min(job.waitRemainingMillis,BatchWorkflowRules.CLEAR_BUFFER_MILLIS):BatchWorkflowRules.CLEAR_BUFFER_MILLIS);
                     }
-                    if(job.phase==Phase.CAPTURE)captureStarted=-1;
-                    if(job.phase==Phase.PRINT)host.batchStartDrawing();
+                    if(job.phase==Phase.CAPTURE)captureStarted=System.currentTimeMillis()
+                        -(2000-(job.waitRemainingMillis>=0?Math.min(2000,job.waitRemainingMillis):2000));
+                    if(job.phase==Phase.PRINT)host.batchResumeDrawing(job.drawing);
+                    if(job.phase==Phase.REVIEW) {
+                        host.batchRestoreReviewContext(job.drawing);
+                        host.batchBeginReviewRepairs(job.repairPass);
+                        if(job.inspection!=null) {
+                            // Old narrow checkpoints migrate to broad perception. Never trust saved observations.
+                            inspection=new BatchInspection(BatchInspection.SCAN_WIDTH,host.batchReviewReverse(),
+                                host.batchReviewOriginX(),host.batchReviewOriginZ());
+                            inspectionWaypoint=0;
+                            inspectionResume=new BlockPos(job.inspection.resumeX(),painting.y(),job.inspection.resumeZ());
+                            host.batchMessage("恢复宽范围复查：重新读取画布，只接近漏格和未加载区域");
+                        }
+                    }
+                    host.batchMessage("已从磁盘恢复："+job.phase+"；"+elapsedStatus()+"；不会重新清理已进入绘制的画布");
                 } else {
                     job=new BatchJournal.State();job.world=world();job.dimension=dimension();job.folder=folder.toString();
                     job.configuration=config.signature();job.locations=config.locations();job.queue=new ArrayList<>(files);
                 }
+                runtimeRestored=true;
+                clockNanos=System.nanoTime();
                 save();
             }
             if(job==null)throw new IOException("批次状态未初始化");
+            if(System.nanoTime()-lastSavedNanos>=2_000_000_000L) {
+                captureDrawing();
+                save();
+            }
             switch(job.phase) {
                 case LOAD -> {
                     if(painting==null)loadPainting();
@@ -199,7 +340,7 @@ public final class MapArtBatchController {
                     if(initial.unknown()>0){loadCanvas("清理前范围检查");return true;}
                     if(initial.missingSupport()>0)throw new IOException("画布缺少底板 "+initial.missingSupport()+" 格，尚未触发清理");
                     if(initial.water()>0)throw new IOException("画布已有水，需先人工确认清理装置状态，尚未触发拉杆");
-                    fetchAttempts=lockInputAttempts=lockAttempts=depositAttempts=0;
+                    fetchAttempts=lockInputAttempts=lockAttempts=depositAttempts=mapSwapAttempts=0;
                     job.privateMaps=mapIds();job.initialGlass=count(Items.GLASS_PANE);save();
                     transition(Phase.CLEAR_ON_1);
                 }
@@ -209,16 +350,12 @@ public final class MapArtBatchController {
                 case CHECK_CLEAR -> {job.deadline=System.currentTimeMillis()+BatchWorkflowRules.CLEAR_BUFFER_MILLIS;transition(Phase.CLEAR_BUFFER);}
                 case CLEAR_BUFFER -> waitClearBuffer();
                 case PRINT -> {
-                    if(host.batchWorkerPaused()){pause("绘制已暂停，请检查材料或放置状态，再点击 Start / Resume");return true;}
-                    int lane=host.batchLane();
-                    if(host.batchReadyForReview()&&tick-lastVerification>=20&&(host.batchRemaining()<50||lane!=lastLane)) {
-                        // Freeze new work at the band boundary, but allow an
-                        // already queued rotation/placement to finish first.
+                    checkpointDrawing();
+                    if(host.batchWorkerPaused()){pause("绘制已暂停，请检查材料或放置状态，再重新开启本模块自动恢复");return true;}
+                    if(host.batchWorkSweepFinished()) {
                         host.batchHoldForReview();
-                        if(host.batchPlacementPending()){report("条带复查：等待在途放置结束");return true;}
-                        lastLane=lane;lastVerification=tick;
-                        Scan scan=scan(false);errors=scan.errors();
-                        if(scan.unknown()==0&&BatchFiles.acceptableErrors(errors)){beginInspection();return true;}
+                        if(host.batchPlacementPending()){report("首轮完成，等待在途放置确认后开始修补");return true;}
+                        beginInspection();return true;
                     }
                     return false;
                 }
@@ -258,11 +395,12 @@ public final class MapArtBatchController {
             throw new IOException("本文件按Litematica原点换算后的范围与本批画布不同，已停止以免清理其他位置");
         job.initialMinX=painting.minX();job.initialMinZ=painting.minZ();job.initialY=painting.y();
         host.batchPrepare(painting);access.start(painting.y());errors=-1;
+        inspection=null;inspectionWaypoint=0;inspectionResume=null;
     }
 
     private void lever(boolean target,Phase waiting) throws IOException {
-        var hit=access.approach(config.lever(),tick);checkAccess();
-        if(hit==null){report("前往清理拉杆");return;}
+        var hit=access.approachLever(config.lever(),tick);checkAccess();
+        if(hit==null){report("前往清理拉杆（水中允许沿底板走动）");return;}
         BlockState state=mc.world.getBlockState(config.lever());
         if(!state.isOf(Blocks.LEVER))throw new IOException("登记位置已不是拉杆");
         boolean powered=state.get(LeverBlock.POWERED);
@@ -309,49 +447,120 @@ public final class MapArtBatchController {
         long left=job.deadline-System.currentTimeMillis();
         if(left>0){report("清理后缓冲 "+((left+999)/1000)+"秒（不检查清空结果）");return;}
         host.batchPrepare(painting);transition(Phase.PRINT);host.batchStartDrawing();
+        captureDrawing();save();
+    }
+
+    private void captureDrawing() {
+        if(job==null||job.phase!=Phase.PRINT||resuming||discovery!=null)return;
+        BatchPrintCheckpoint checkpoint=host.batchDrawingCheckpoint();
+        if(checkpoint!=null)job.drawing=checkpoint;
+    }
+
+    private void checkpointDrawing() throws IOException {
+        BatchPrintCheckpoint previous=job.drawing;
+        captureDrawing();
+        if(job.drawing==null)return;
+        if(previous==null||previous.cursor()!=job.drawing.cursor()||!previous.route().equals(job.drawing.route())
+            ||System.currentTimeMillis()-drawingSavedAt>=2000) {
+            save();drawingSavedAt=System.currentTimeMillis();
+        }
     }
 
     private void beginInspection() throws IOException {
+        captureDrawing();
         host.batchStopWorker();
-        inspection=null;inspectionWaypoint=0;
+        job.repairPass=1;
+        beginRepairPass();
+    }
+
+    private void beginRepairPass() throws IOException {
+        host.batchBeginReviewRepairs(job.repairPass);
+        inspection=null;inspectionWaypoint=0;inspectionResume=null;job.inspection=null;
+        inspectionRepairTarget=null;inspectionDeferred.clear();canvasScanIndex=0;completedScanRevision=-1;
         transition(Phase.REVIEW);
-        host.batchMessage("开始实际走位复查：蛇形从起点走到终点，途中不放置，分别统计漏放和错放");
+        host.batchMessage("开始第 "+(job.repairPass+1L)+" 轮宽范围补检：分帧读取整个已加载画布，32格扫描带，仅接近缺口；允许漏放 ≤ "+host.batchAllowedMissingBlocks());
     }
 
     private void inspectDrawing() throws IOException {
         if(inspection==null) {
-            inspection=new BatchInspection(Math.max(1,Math.min(5,host.batchReviewWidth())),host.batchReviewReverse());
+            inspection=new BatchInspection(BatchInspection.SCAN_WIDTH,host.batchReviewReverse(),
+                host.batchReviewOriginX(),host.batchReviewOriginZ());
             inspectionWaypoint=0;
         }
-        if(tick%5==0||inspectionWaypoint>=inspection.route().size())observeNearby();
+        inspectionResume=null; // Perception does not need to retrace a previous physical scan cursor.
+        observeNearby();
+        if(host.batchRepairNearby()) {
+            access.release(tick);
+            report("第 "+(job.repairPass+1L)+" 轮蛇形修补：已检查 "+inspection.observed()+"/16384，漏放 "+inspection.missing()+"（允许 ≤ "+host.batchAllowedMissingBlocks()+"），错占 "+inspection.wrong()+"（不计门槛）");
+            return;
+        }
         errors=inspection.errors();
+        // Finish one fresh, bounded scan after the last server change/placement before accepting.
+        int unknown=inspection.unknown(),allowed=host.batchAllowedMissingBlocks();
+        if(inspection.canAccept(completedScanRevision,canvasRevision.get(),host.batchPlacementPending(),allowed)) {
+            drawingAccepted(allowed);return;
+        }
+        if(inspectionRepairTarget!=null) {
+            BlockPos target=inspectionRepairTarget;
+            if(!mc.world.isChunkLoaded(target.getX()>>4,target.getZ()>>4)) {
+                int approach=access.walk(target,tick);
+                if(approach==0){report("靠近已发现的漏格，加载对应区块");return;}
+                access.reset();
+                if(approach<0){inspectionDeferred.add(target);inspectionRepairTarget=null;return;}
+            }
+            access.release(tick);
+            if(host.batchRepairTarget(target)){report("定点补漏 "+target.toShortString()+"，剩余漏放 "+inspection.missing());return;}
+            inspectionDeferred.add(target);inspectionRepairTarget=null;access.resetTravel();
+            observeCell(target.getX()-painting.minX(),target.getZ()-painting.minZ());
+        }
+        var missing=inspection.nextMissing(mc.player.getBlockX()-painting.minX(),mc.player.getBlockZ()-painting.minZ(),
+            point->{BlockPos pos=painting.position(point.x(),point.z());return !inspectionDeferred.contains(pos)&&host.batchRepairEligible(pos);});
+        if(missing!=null){inspectionRepairTarget=painting.position(missing.x(),missing.z());access.release(tick);return;}
+        // Let the initial scan finish before walking to an area that is already loaded.
+        if(completedScanRevision<0){access.release(tick);report("分帧读取画布："+inspection.observed()+"/16384");return;}
+        while(inspectionWaypoint<inspection.route().size()&&!inspection.needsVisit(inspection.route().get(inspectionWaypoint)))inspectionWaypoint++;
         if(inspectionWaypoint<inspection.route().size()) {
             var point=inspection.route().get(inspectionWaypoint);
             int route=access.walk(painting.position(point.x(),point.z()),tick);
             checkAccess();
-            if(route<0)throw new IOException("实际复查路点不可达："+painting.position(point.x(),point.z()).toShortString());
-            if(route==1){observeNearby();inspectionWaypoint++;}
-            report("走位复查 "+inspectionWaypoint+"/"+inspection.route().size()+"，已检查 "+inspection.observed()+"/16384，漏放 "+inspection.missing()+"，错放 "+inspection.wrong());
+            if(route<0) {
+                host.batchMessage("复查路点暂不可达，跳过本点继续走；未读取区域不会算作通过："+painting.position(point.x(),point.z()).toShortString());
+                access.reset();inspectionWaypoint++;save();
+                return;
+            }
+            if(route==1){inspectionWaypoint++;save();}
+            report("第 "+(job.repairPass+1L)+" 轮修补 "+inspectionWaypoint+"/"+inspection.route().size()+"，已检查 "+inspection.observed()+"/16384，漏放 "+inspection.missing()+"（允许 ≤ "+host.batchAllowedMissingBlocks()+"），错占 "+inspection.wrong()+"（不计门槛）");
             return;
         }
+        if(host.batchPlacementPending()){access.release(tick);report("等待本轮最后的放置确认");return;}
+        // Fresh observations remain valid when the player walks far enough to
+        // unload a chunk. Offline checkpoints are invalidated separately on resume.
+        if(completedScanRevision!=canvasRevision.get()){access.release(tick);report("正在确认最后一次放置后的实际画布");return;}
         access.reset();errors=inspection.errors();
-        if(!inspection.complete())throw new IOException("走位复查仍有 "+inspection.unknown()+" 格未实际读取，不能当成完成，请检查道路或区块加载后继续");
-        host.batchMessage("整图走位复查结束：漏放 "+inspection.missing()+"，错放 "+inspection.wrong()+"，合计 "+errors);
-        if(BatchFiles.acceptableErrors(errors))drawingAccepted();
-        else {transition(Phase.PRINT);host.batchRetryDrawing(errors);}
+        unknown=inspection.unknown();allowed=host.batchAllowedMissingBlocks();
+        host.batchMessage("第 "+(job.repairPass+1L)+" 轮修补结束：漏放 "+inspection.missing()+"（允许 ≤ "+allowed+"），错占 "+inspection.wrong()+"（仅标记，不计门槛），未读取 "+unknown);
+        if(BatchWorkflowRules.reviewAction(job.repairPass,inspection.missing(),unknown,allowed)==BatchWorkflowRules.ReviewAction.ACCEPT)
+            drawingAccepted(allowed);
+        else {job.repairPass=BatchWorkflowRules.nextRepairPass(job.repairPass);beginRepairPass();}
     }
 
     private void observeNearby() {
-        int playerX=mc.player.getBlockX()-painting.minX(),playerZ=mc.player.getBlockZ()-painting.minZ();
-        for(int z=Math.max(0,playerZ-BatchInspection.RADIUS);z<=Math.min(127,playerZ+BatchInspection.RADIUS);z++)
-            for(int x=Math.max(0,playerX-BatchInspection.RADIUS);x<=Math.min(127,playerX+BatchInspection.RADIUS);x++) {
-                BlockPos pos=painting.position(x,z);
-                if(!mc.world.isChunkLoaded(pos.getX()>>4,pos.getZ()>>4))continue;
-                BlockState actual=serverBlocks.getOrDefault(pos,mc.world.getBlockState(pos)),expected=painting.at(x,z);
-                BatchInspection.Cell result=host.batchExcluded(expected)||actual.equals(expected)?BatchInspection.Cell.CORRECT
-                    :!expected.isAir()&&actual.isAir()?BatchInspection.Cell.MISSING:BatchInspection.Cell.WRONG;
-                inspection.observe(x,z,result);
-            }
+        long started=System.nanoTime();
+        for(int count=0;count<BatchInspection.MAX_SCAN_CELLS;count++) {
+            if(canvasScanIndex==0)scanStartRevision=canvasRevision.get();
+            observeCell(canvasScanIndex%128,canvasScanIndex/128);
+            if(++canvasScanIndex==16384){canvasScanIndex=0;completedScanRevision=scanStartRevision;break;}
+            if((count&31)==31&&System.nanoTime()-started>=BatchInspection.MAX_SCAN_NANOS)break;
+        }
+    }
+
+    private void observeCell(int x,int z) {
+        BlockPos pos=painting.position(x,z);
+        if(!mc.world.isChunkLoaded(pos.getX()>>4,pos.getZ()>>4))return;
+        BlockState actual=observedBlock(pos),expected=painting.at(x,z);
+        inspection.observe(x,z,BatchInspection.classify(host.batchExcluded(expected),expected.isAir(),
+            actual.equals(expected),actual.isAir(),actual.isReplaceable()));
+        host.batchObserveBlock(pos);
     }
 
     private Scan scan(boolean clear) {
@@ -376,9 +585,12 @@ public final class MapArtBatchController {
         report(purpose+"：靠近中央加载全图");
     }
 
-    private void drawingAccepted() throws IOException {
+    private void drawingAccepted(int allowedMissing) throws IOException {
+        if(inspection!=null&&!inspection.canAccept(completedScanRevision,canvasRevision.get(),host.batchPlacementPending(),allowedMissing))return;
+        if(inspection==null||BatchWorkflowRules.reviewAction(job.repairPass,inspection.missing(),inspection.unknown(),allowedMissing)
+            !=BatchWorkflowRules.ReviewAction.ACCEPT)throw new IOException("漏放检查尚未达到当前允许值，不能开始制图");
         host.batchStopWorker();access.reset();
-        host.batchMessage("实际世界复查："+errors+" 格不正确（小于50），进入地图制作");
+        host.batchMessage("漏放检查达标："+inspection.missing()+" ≤ "+allowedMissing+" 格；错占 "+inspection.wrong()+" 格不计门槛，进入地图制作");
         job.privateMaps=mapIds();job.initialGlass=count(Items.GLASS_PANE);
         transition(Phase.FETCH_MAP);
     }
@@ -405,10 +617,10 @@ public final class MapArtBatchController {
         if(source<0)throw new IOException("地图原料箱缺少 "+wanted.getName().getString());
         int destination=handler.getSlotIndex(mc.player.getInventory(),reserved).orElseThrow(()->new IOException("未找到预留背包槽"));
         if(!handler.getSlot(destination).getStack().isEmpty())throw new IOException("地图原料预留槽被占用");
-        if(++fetchAttempts>3)throw new IOException("领取原料连续未获服务器确认，已暂停；检查后点击 Start / Resume 重试");
+        if(++fetchAttempts>3)throw new IOException("领取原料连续未获服务器确认，已暂停；检查后重新开启本模块自动恢复");
         if(map){job.mapSlot=reserved;job.mapIssued=true;}else{job.glassSlot=reserved;job.glassIssued=true;}
         job.materialInventoryBefore=inventoryFingerprint();save();
-        transferOne(handler,source,destination);actionAt=tick;
+        actionAt=tick;if(!transferOne(handler,source,destination))return;
         // Reopen to obtain authoritative contents rather than treating local
         // click prediction as a receipt (also works behind the Esc menu).
         access.reset();report("领取1个 "+wanted.getName().getString()+"，重新确认服务器背包");
@@ -416,23 +628,80 @@ public final class MapArtBatchController {
 
     private void activateMap() throws IOException {
         if(job.rawMap>=0) { if(findMap(job.rawMap)<0)throw new IOException("本轮已生成的地图不在背包，已暂停以免重复生成");transition(Phase.CAPTURE);return; }
+        if(!job.activationIssued&&!prepareActivationMap())return;
         int route=access.walk(painting.center(),tick);
         if(route<0)throw new IOException("无法走到画布中央");
         if(route==0){report("前往画布中央生成地图");return;}
         access.release(tick);
         Set<Integer> candidates=inventoryMapIds();candidates.removeAll(privateMapIds());
         if(job.activationIssued&&candidates.size()==1) {
-            job.rawMap=candidates.iterator().next();save();captureStarted=-1;transition(Phase.CAPTURE);return;
+            job.rawMap=candidates.iterator().next();save();
+            host.batchMessage("空地图已激活，收到本轮地图ID=" + job.rawMap + "；中央持图约2秒后前往制图台");
+            captureStarted=-1;transition(Phase.CAPTURE);return;
         }
         if(!candidates.isEmpty())throw new IOException("背包出现未能归属本次激活操作的新地图，已暂停");
-        if(job.activationIssued){if(actionAt<0||tick-actionAt>100)throw new IOException("空地图使用结果不确定，已暂停；不会再拿一张重做");report("等待新地图ID");return;}
+        if(job.activationIssued){if(actionAt<0||tick-actionAt>100)throw new IOException("空地图对空气右键后未确认生成结果，已暂停；不会重复消耗另一张地图");report("已对空气使用空地图，等待服务器返回新地图ID");return;}
         if(job.mapSlot<0||!mc.player.getInventory().getStack(job.mapSlot).isOf(Items.MAP))throw new IOException("本轮空地图不在预留槽");
-        if(!holdInventorySlot(job.mapSlot,Items.MAP,-1)) {
-            if(job.mapSlot>=9){job.mapSlot=mc.player.getInventory().getSelectedSlot();save();}
-            return;
+        if(!holdInventorySlot(job.mapSlot,Items.MAP,-1))return;
+        useEmptyMapInAir();
+    }
+
+    /** Swap beside the supply box and reopen it for an authoritative inventory receipt. */
+    private boolean prepareActivationMap() throws IOException {
+        if(job.mapSwapSource<0&&job.mapSlot>=0&&job.mapSlot<9) {
+            ItemStack owned=mc.player.getInventory().getStack(job.mapSlot);
+            if(!owned.isOf(Items.MAP)||owned.getCount()!=1)throw new IOException("本轮单张空地图不在预留快捷栏槽位");
+            return true;
         }
+        ScreenHandler handler=open(config.mapSupply(),false);if(handler==null)return false;
+        if(job.mapSwapSource>=0) {
+            ItemStack source=mc.player.getInventory().getStack(job.mapSwapSource);
+            ItemStack target=mc.player.getInventory().getStack(job.mapSwapTarget);
+            var recovery=BatchJournal.mapSwapRecovery(source.isOf(Items.MAP)?source.getCount():0,
+                target.isOf(Items.MAP)?target.getCount():0);
+            if(recovery==BatchJournal.MapSwapRecovery.CONFIRMED_DESTINATION) {
+                if(job.glassSlot==job.mapSwapTarget)job.glassSlot=job.mapSwapSource;
+                job.mapSlot=job.mapSwapTarget;job.mapSwapSource=job.mapSwapTarget=-1;
+                save();access.reset();report("服务器已确认空地图换手，前往画布中央");return false;
+            }
+            if(recovery!=BatchJournal.MapSwapRecovery.RETRY_SOURCE)
+                throw new IOException("空地图换手的两个槽位无法唯一确认本轮地图；保留当前阶段，不会重新领取地图");
+            job.mapSlot=job.mapSwapSource;
+            job.mapSwapSource=job.mapSwapTarget=-1;save();
+        }
+        if(job.mapSlot<9||job.mapSlot>=36)throw new IOException("本轮空地图的背包槽位无效");
+        ItemStack source=mc.player.getInventory().getStack(job.mapSlot);
+        if(!source.isOf(Items.MAP)||source.getCount()!=1)throw new IOException("本轮单张空地图不在登记的背包槽位，不会重复领取");
+        int target=mc.player.getInventory().getSelectedSlot();
+        if(mc.player.getInventory().getStack(target).isOf(Items.MAP)) {
+            target=-1;
+            for(int slot=0;slot<9;slot++)if(!mc.player.getInventory().getStack(slot).isOf(Items.MAP)){target=slot;break;}
+        }
+        if(target<0)throw new IOException("快捷栏均为空地图，无法唯一确认本轮地图的换手结果");
+        int sourceSlot=handler.getSlotIndex(mc.player.getInventory(),job.mapSlot)
+            .orElseThrow(()->new IOException("地图原料箱未提供本轮地图的背包槽位"));
+        if(++mapSwapAttempts>3)throw new IOException("空地图换手连续未获服务器确认，保留本轮地图并暂停");
+        // Keep mapSlot pointing at the old confirmed slot until the fresh
+        // container inventory proves which side of this atomic swap survived.
+        job.mapSwapSource=job.mapSlot;job.mapSwapTarget=target;save();
+        click(handler,sourceSlot,target,SlotActionType.SWAP);
+        access.reset();report("空地图换到快捷栏，重新开箱确认服务器背包");return false;
+    }
+
+    private void useEmptyMapInAir() throws IOException {
+        if(mc.player.currentScreenHandler!=mc.player.playerScreenHandler)
+            throw new IOException("请关闭容器后再激活空地图");
+        ItemStack held=mc.player.getMainHandStack();
+        if(mc.player.getInventory().getSelectedSlot()!=job.mapSlot||!held.isOf(Items.MAP)||held.getCount()!=1)
+            throw new IOException("主手不是本轮领取的单张空地图，已暂停激活");
+        // Write the intent first: an interrupted response must not cause a second use.
         job.activationIssued=true;save();actionAt=tick;
-        mc.interactionManager.interactItem(mc.player,Hand.MAIN_HAND);report("在中央使用本轮空地图");
+        // Direct item use is the air-right-click path, regardless of the crosshair.
+        // Never use interactBlock or hold the use key: either can open a dispenser.
+        mc.interactionManager.interactItem(mc.player,Hand.MAIN_HAND);
+        mc.player.swingHand(Hand.MAIN_HAND);
+        report("已在画布中央对空气右键激活空地图，等待新地图ID");
+        host.batchMessage("已在画布中央对空气使用本轮空地图；确认激活前不会进入制图台步骤");
     }
 
     private void capture() throws IOException {
@@ -453,14 +722,14 @@ public final class MapArtBatchController {
             int source=findHandlerMap(handler,job.rawMap);
             if(source<0)throw new IOException("本轮地图不在背包或制图台，无法继续锁定");
             if(++lockInputAttempts>6)throw new IOException("制图台连续拒绝输入材料，已暂停，请检查服务器限制后继续");
-            save();transferOne(handler,source,0);actionAt=tick;return;
+            save();actionAt=tick;transferOne(handler,source,0);return;
         }
         if(pane.isEmpty()) {
             if(count(Items.GLASS_PANE)<=job.initialGlass)throw new IOException("本轮玻璃板缺失");
             int source=findHandlerItem(handler,Items.GLASS_PANE);
             if(source<0)throw new IOException("背包中没有玻璃板");
             if(++lockInputAttempts>6)throw new IOException("制图台连续拒绝输入材料，已暂停，请检查服务器限制后继续");
-            save();transferOne(handler,source,1);actionAt=tick;return;
+            save();actionAt=tick;transferOne(handler,source,1);return;
         }
         ItemStack result=handler.getSlot(2).getStack();
         if(!result.isOf(Items.FILLED_MAP)||result.get(DataComponentTypes.MAP_POST_PROCESSING)!=MapPostProcessingComponent.LOCK) {
@@ -529,7 +798,8 @@ public final class MapArtBatchController {
         // Journal the intent without transition(): that helper closes the
         // owned screen, which must stay open until the click is dispatched.
         job.depositIssued=true;job.phase=Phase.STORE_PENDING;save();
-        transferOne(handler,source,destination);access.reset();report("存入本轮地图，重新开箱确认");
+        if(!transferOne(handler,source,destination))return;
+        access.reset();report("存入本轮地图，重新开箱确认");
     }
 
     private ScreenHandler open(BlockPos pos,boolean cartography) throws IOException {
@@ -538,35 +808,71 @@ public final class MapArtBatchController {
         return handler;
     }
     private void checkAccess() throws IOException {if(access.failure()!=null)throw new IOException(access.failure());}
+    private boolean cursorStorageAllowed(ItemStack stack) {
+        if(host.batchCursorStorageAllowed(stack))return true;
+        ScreenHandler handler=mc.player.currentScreenHandler;
+        if(job==null||!access.owns(handler)||StorageBlockUtils.storageSlots(handler)<=0)return false;
+        BlockPos position=access.ownedPosition(handler);
+        if(config.mapSupply().equals(position))return stack.isOf(Items.MAP)||stack.isOf(Items.GLASS_PANE);
+        return config.product().equals(position)&&job.lockedMap>=0&&mapId(stack)==job.lockedMap;
+    }
     private void transition(Phase next) throws IOException {
         access.reset();job.phase=next;job.pause="";actionAt=-1;waitStarted=-1;save();report(next.name());
     }
-    private void save() throws IOException {if(job!=null)journal.write(job);}
+    private void save() throws IOException {
+        if(job==null||!runtimeRestored||resuming||discovery!=null)return;
+        long now=System.nanoTime();
+        if(clockNanos>=0&&running)job.elapsedMillis+=Math.max(0,now-clockNanos)/1_000_000L;
+        clockNanos=running?now:-1;
+        if(BatchWorkflowRules.leverWait(job.phase)||job.phase==Phase.CLEAR_BUFFER)
+            job.waitRemainingMillis=Math.max(0,Math.min(20000,job.deadline-System.currentTimeMillis()));
+        else if(job.phase==Phase.CAPTURE)
+            job.waitRemainingMillis=captureStarted<0?2000:Math.max(0,2000-(System.currentTimeMillis()-captureStarted));
+        else job.waitRemainingMillis=-1;
+        if(job.phase==Phase.REVIEW&&inspection!=null&&mc.player!=null) {
+            BlockPos resume=inspectionResume!=null?inspectionResume:mc.player.getBlockPos();
+            job.inspection=inspection.checkpoint(inspectionWaypoint,resume.getX(),resume.getZ());
+        }
+        try { journal.write(job); }
+        catch(IOException exception){stopSaveFailure=exception;throw exception;}
+        stopSaveFailure=null;
+        lastSavedNanos=now;
+    }
     private void pause(String reason) {
-        running=false;status=reason;host.batchStopWorker();access.release(tick);
-        if(job!=null){job.pause=reason;try{journal.write(job);}catch(IOException exception){status+="；保存失败："+exception.getMessage();}}
+        captureDrawing();status=reason;
+        if(job!=null){job.pause=reason;try{save();}catch(IOException exception){status+="；保存失败："+exception.getMessage();}}
+        running=false;clockNanos=-1;host.batchStopWorker();access.release(tick);
         host.batchPauseWorker(status());host.batchMessage("全自动已暂停："+status());
     }
     private void report(String text) {status=text;host.batchStatus(status());}
     private String prefix() {
         if(job==null||job.queue.isEmpty())return "[全自动] ";
         String file=job.index<job.queue.size()?job.queue.get(job.index).name():"完成";
-        return "["+Math.min(job.index+1,job.queue.size())+"/"+job.queue.size()+" "+file+(errors>=0?" 错误="+errors:"")+"] ";
+        return "["+queueProgress()+"："+file+(inspection!=null?" 漏放="+inspection.missing()+"/"+host.batchAllowedMissingBlocks()
+            +" 错占="+inspection.wrong()+"（不计门槛）":errors>=0?" 观察差异="+errors:"")+"] ";
     }
     private static String message(Throwable exception) {while(exception.getCause()!=null)exception=exception.getCause();return exception.getMessage()==null?exception.toString():exception.getMessage();}
 
     public void receive(Packet<?> packet) {
+        cursorRecovery.onPacket(packet);
         if(packet instanceof InventoryS2CPacket inventory)access.inventoryReceived(inventory.syncId());
         if(packet instanceof MapUpdateS2CPacket map)lockedMaps.put(map.mapId().id(),map.locked());
         if(packet instanceof BlockUpdateS2CPacket block)observeBlock(block.getPos(),block.getState());
         if(packet instanceof ChunkDeltaUpdateS2CPacket delta)delta.visitUpdates(this::observeBlock);
-        if(packet instanceof ChunkDataS2CPacket chunk)serverBlocks.keySet().removeIf(pos->(pos.getX()>>4)==chunk.getChunkX()&&(pos.getZ()>>4)==chunk.getChunkZ());
+        if(packet instanceof ChunkDataS2CPacket chunk) {
+            serverBlocks.keySet().removeIf(pos->(pos.getX()>>4)==chunk.getChunkX()&&(pos.getZ()>>4)==chunk.getChunkZ());
+            BatchPainting current=painting;
+            if(current!=null&&chunk.getChunkX()>=(current.minX()>>4)&&chunk.getChunkX()<=((current.minX()+127)>>4)
+                &&chunk.getChunkZ()>=(current.minZ()>>4)&&chunk.getChunkZ()<=((current.minZ()+127)>>4))canvasRevision.incrementAndGet();
+        }
     }
     private void observeBlock(BlockPos pos,BlockState state) {
         if(pos.equals(watchedLever)&&state.isOf(Blocks.LEVER))leverAcks.put(pos.toImmutable(),new LeverAck(blockVersion.incrementAndGet(),state.get(LeverBlock.POWERED)));
         BatchPainting current=painting;
         if(current!=null&&pos.getY()==current.y()&&pos.getX()>=current.minX()&&pos.getX()<current.minX()+128
-            &&pos.getZ()>=current.minZ()&&pos.getZ()<current.minZ()+128)serverBlocks.put(pos.toImmutable(),state);
+            &&pos.getZ()>=current.minZ()&&pos.getZ()<current.minZ()+128) {
+            serverBlocks.put(pos.toImmutable(),state);canvasRevision.incrementAndGet();
+        }
     }
     private int emptySlot() {for(int i=0;i<36;i++)if(mc.player.getInventory().getStack(i).isEmpty())return i;return -1;}
     private int count(Item item) {int count=0;for(int i=0;i<36;i++)if(mc.player.getInventory().getStack(i).isOf(item))count+=mc.player.getInventory().getStack(i).getCount();return count;}
@@ -581,10 +887,11 @@ public final class MapArtBatchController {
         if(mc.player.currentScreenHandler!=h)throw new IOException("容器在操作中发生变化");
         mc.interactionManager.clickSlot(h.syncId,slot,button,type,mc.player);
     }
-    private void transferOne(ScreenHandler h,int from,int to) throws IOException {
-        if(!h.getCursorStack().isEmpty())throw new IOException("鼠标已有物品，拒绝取放");
+    private boolean transferOne(ScreenHandler h,int from,int to) throws IOException {
+        if(!h.getCursorStack().isEmpty()){report("自动收回鼠标物品后继续取放");return false;}
         ItemStack source=h.getSlot(from).getStack().copy();
         if(source.isEmpty())throw new IOException("来源槽已空");
+        cursorRecovery.rememberOrigin(h,from);
         click(h,from,0,SlotActionType.PICKUP);
         try {click(h,to,1,SlotActionType.PICKUP);}
         finally {
@@ -592,7 +899,8 @@ public final class MapArtBatchController {
             if(!cursor.isEmpty()&&(original.isEmpty()||ItemStack.areItemsAndComponentsEqual(cursor,original))
                 &&cursor.getCount()+original.getCount()<=cursor.getMaxCount())click(h,from,0,SlotActionType.PICKUP);
         }
-        if(!h.getCursorStack().isEmpty())throw new IOException("取放后鼠标仍有物品，请手动放回后继续");
+        if(!h.getCursorStack().isEmpty()){report("取放中断，自动收回鼠标物品后继续");return false;}
+        return true;
     }
     private boolean holdMap(int id) throws IOException {
         int slot=findMap(id);if(slot<0)throw new IOException("本轮地图ID="+id+" 不在背包");
@@ -602,7 +910,12 @@ public final class MapArtBatchController {
         ItemStack held=mc.player.getMainHandStack();
         if(mc.player.getInventory().getSelectedSlot()==slot&&held.isOf(item)&&(map<0||mapId(held)==map))return true;
         if(slot<9)InvUtils.swap(slot,false);
-        else InvUtils.move().from(slot).toHotbar(mc.player.getInventory().getSelectedSlot());
+        else if(mc.player.currentScreenHandler==mc.player.playerScreenHandler
+            &&mc.player.currentScreenHandler.getCursorStack().isEmpty()) {
+            int source=mc.player.playerScreenHandler.getSlotIndex(mc.player.getInventory(),slot).orElse(-1);
+            if(source>=0)mc.interactionManager.clickSlot(mc.player.playerScreenHandler.syncId,source,
+                mc.player.getInventory().getSelectedSlot(),SlotActionType.SWAP,mc.player);
+        }
         return false;
     }
     private String inventoryFingerprint() {

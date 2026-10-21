@@ -19,6 +19,13 @@ public final class MapArtSupplyPlanner {
         }
     }
 
+    /** Reserve colors across both legs before allocating extra stacks to the outward leg. */
+    public static <T> Plan<T> planRoundTrip(List<List<T>> bands, Map<T, Stock> inventory, int emptySlots) {
+        List<T> roundTrip = new ArrayList<>();
+        for (int index = 0; index < Math.min(2, bands.size()); index++) roundTrip.addAll(bands.get(index));
+        return plan(List.of(roundTrip), inventory, emptySlots);
+    }
+
     public static <T> Plan<T> plan(List<List<T>> bands, Map<T, Stock> inventory, int emptySlots) {
         Map<T, Integer> demand = new LinkedHashMap<>();
         Map<T, Integer> slots = new LinkedHashMap<>();

@@ -110,5 +110,4 @@ public final class BatchFiles {
     public static boolean aligned(int minX, int minZ) {
         return Math.floorMod(minX + 64, 128) == 0 && Math.floorMod(minZ + 64, 128) == 0;
     }
-    public static boolean acceptableErrors(int count) { return count >= 0 && count < 50; }
 }

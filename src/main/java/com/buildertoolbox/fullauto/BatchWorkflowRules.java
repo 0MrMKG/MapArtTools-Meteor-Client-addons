@@ -8,6 +8,17 @@ public final class BatchWorkflowRules {
     public static final long CLEAR_BUFFER_MILLIS = 10000;
     public enum LeverRecovery { EXECUTE, CONFIRMED, AMBIGUOUS }
     public enum ProductRecovery { CONFIRMED, TRANSFER, AMBIGUOUS, MISSING }
+    public enum ReviewAction { REPAIR_AGAIN, ACCEPT }
+    /** Pass 1 is the second overall sweep; keep repairing until the live missing limit is met. */
+    public static ReviewAction reviewAction(int pass,int missing,int unknown,int allowedMissing) {
+        if(pass<1||missing<0||unknown<0||allowedMissing<0||allowedMissing>16384)
+            throw new IllegalArgumentException("Invalid repair sweep result or missing-block limit");
+        return unknown==0&&missing<=allowedMissing?ReviewAction.ACCEPT:ReviewAction.REPAIR_AGAIN;
+    }
+    public static int nextRepairPass(int pass) {
+        if(pass<1)throw new IllegalArgumentException("Invalid repair sweep number");
+        return Math.incrementExact(pass);
+    }
     public static Phase nextLeverPhase(Phase phase) {
         return switch(phase) {
             case CLEAR_ON_1 -> Phase.WAIT_ON_1;

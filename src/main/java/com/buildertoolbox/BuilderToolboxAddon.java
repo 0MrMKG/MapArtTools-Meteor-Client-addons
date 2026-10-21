@@ -1,7 +1,6 @@
 package com.buildertoolbox;
 
 import com.mojang.logging.LogUtils;
-import com.buildertoolbox.modules.LitematicaPrinterModule;
 import com.buildertoolbox.modules.LitematicaMapArtModule;
 import com.buildertoolbox.modules.FullAutoMapArtModule;
 import com.buildertoolbox.fullauto.MapArtModeGuard;
@@ -9,6 +8,7 @@ import com.buildertoolbox.modules.ChestOrganizerModule;
 import com.buildertoolbox.modules.UnderfootScaffoldModule;
 import com.buildertoolbox.modules.AutoCraftModule;
 import java.lang.reflect.Field;
+import java.util.Comparator;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -23,17 +23,31 @@ public final class BuilderToolboxAddon extends MeteorAddon {
     @Override
     public void onInitialize() {
         LOG.info("Initializing Builder Toolbox");
-        LitematicaPrinterModule printer = new LitematicaPrinterModule();
-        setMenuTitle(printer, "Schematic Printer");
-        Modules.get().add(printer);
-        Modules.get().add(new LitematicaMapArtModule());
+        LitematicaMapArtModule once = new LitematicaMapArtModule();
+        setMenuTitle(once, "Map Art Maker（Once）");
+        Modules.get().add(once);
         FullAutoMapArtModule fullAuto = new FullAutoMapArtModule();
-        setMenuTitle(fullAuto, "map-artmaker-all-auto");
+        setMenuTitle(fullAuto, "Map Art Maker（Full Mode）");
         Modules.get().add(fullAuto);
-        Modules.get().add(new ChestOrganizerModule());
         Modules.get().add(new UnderfootScaffoldModule());
+        Modules.get().add(new ChestOrganizerModule());
         Modules.get().add(new AutoCraftModule());
+        applyMenuOrder(Modules.get());
         MapArtModeGuard.install();
+    }
+
+    /** Meteor alphabetizes groups at startup; keep only our category in its requested order. */
+    public static void applyMenuOrder(Modules modules) {
+        modules.getGroup(CATEGORY).sort(Comparator.comparingInt(BuilderToolboxAddon::menuOrder));
+    }
+
+    private static int menuOrder(Module module) {
+        if (module instanceof LitematicaMapArtModule) return 0;
+        if (module instanceof FullAutoMapArtModule) return 1;
+        if (module instanceof UnderfootScaffoldModule) return 2;
+        if (module instanceof ChestOrganizerModule) return 3;
+        if (module instanceof AutoCraftModule) return 4;
+        return Integer.MAX_VALUE;
     }
 
     private static void setMenuTitle(Module module, String title) {

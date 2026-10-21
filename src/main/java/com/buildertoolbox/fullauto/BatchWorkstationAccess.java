@@ -13,8 +13,10 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.CarpetBlock;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.item.ItemStack;
 import net.minecraft.screen.CartographyTableScreenHandler;
 import net.minecraft.screen.ScreenHandler;
+import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.util.Hand;
 import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.Screen;
@@ -38,6 +40,11 @@ public final class BatchWorkstationAccess {
     private BlockPos stand;
     private BlockPos pathGoal;
     private ScreenHandler owned;
+    private ScreenHandler recoveryOwned, recoveryCandidate;
+    private BlockPos recoveryPosition, recoveryCandidatePosition;
+    private boolean requestedCrafting, recoveryCandidateCrafting;
+    private int requestedFromSyncId = -1, recoveryCandidateFromSyncId = -1;
+    private long recoveryCandidateAt = -1;
     private volatile int inventorySyncId = -1;
     private long ownedAt;
     private int walkY;
@@ -52,8 +59,11 @@ public final class BatchWorkstationAccess {
     private long stoppedAt = -100;
     private double bestDistance = Double.POSITIVE_INFINITY;
     private boolean ownsForward;
+    private boolean leverWaterTravel;
     private boolean closingMenu;
     private BlockPos travelProxy;
+    private BlockPos unstuckGoal;
+    private long unstuckUntil;
     private long currentTick;
     private String failure;
     private String activity = "空闲";
@@ -64,13 +74,45 @@ public final class BatchWorkstationAccess {
     public void start(int floorY) { reset(); walkY = floorY; }
     public void inventoryReceived(int syncId) { inventorySyncId = syncId; }
 
+    /** No interaction: claim only a handler backed by our request and its full server inventory. */
+    public void claimPendingHandler(long tick) {
+        currentTick=tick;
+        if(mc.player==null)return;
+        ScreenHandler current=mc.player.currentScreenHandler;
+        if(recoveryCandidate!=null) {
+            if(current!=recoveryCandidate)clearRecoveryCandidate();
+            else if(ContainerOwnershipPolicy.mayClaim(true,recoveryCandidatePosition!=null,
+                current==mc.player.playerScreenHandler,expectedType(current,recoveryCandidateCrafting),
+                current.syncId,recoveryCandidateFromSyncId,inventorySyncId)) {
+                recoveryOwned=current;recoveryPosition=recoveryCandidatePosition;clearRecoveryCandidate();
+            } else if(tick-recoveryCandidateAt>100)failure="先前打开的自有界面未收到服务器物品回执，请等待同步后恢复";
+        }
+        if(owned==current)return;
+        if(ContainerOwnershipPolicy.mayClaim(requestedAt>=0,target!=null,current==mc.player.playerScreenHandler,
+            expectedType(current,requestedCrafting),current.syncId,requestedFromSyncId,inventorySyncId)) {
+            owned=current;ownedAt=tick;release(tick);
+        } else if(requestedAt>=0&&current!=mc.player.playerScreenHandler
+            &&expectedType(current,requestedCrafting)&&tick-requestedAt>100)
+            failure="界面已打开，但未收到服务器的完整物品列表";
+    }
+
+    private boolean expectedType(ScreenHandler handler,boolean crafting) {
+        return crafting?handler instanceof CartographyTableScreenHandler:StorageBlockUtils.storageSlots(handler)>0;
+    }
+
+    private void clearRecoveryCandidate() {
+        recoveryCandidate=null;recoveryCandidatePosition=null;recoveryCandidateFromSyncId=-1;recoveryCandidateAt=-1;
+    }
+
     public ScreenHandler open(BlockPos pos, boolean crafting, long tick) {
         if (mc.player == null || mc.world == null || pos == null) return null;
         currentTick = tick;
         if (!pos.equals(target)) {
             reset();
             target = pos.toImmutable();
+            requestedCrafting = crafting;
         }
+        setLeverWaterTravel(false);
         if (failure != null) return null;
         if (!mc.world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) { approach(pos, tick); return null; }
         if (crafting ? !mc.world.getBlockState(pos).isOf(Blocks.CARTOGRAPHY_TABLE) : !StorageBlockUtils.isStorage(mc, pos)) {
@@ -79,6 +121,15 @@ public final class BatchWorkstationAccess {
             return null;
         }
         ScreenHandler current = mc.player.currentScreenHandler;
+        if(recoveryMatches(pos,crafting)&&current.getCursorStack().isEmpty()) {
+            // This session was already acknowledged before reset. Continue its
+            // inputs in place instead of closing a full-inventory cartography table.
+            owned=current;ownedAt=tick;inventorySyncId=current.syncId;
+            recoveryOwned=null;recoveryPosition=null;
+        }
+        claimPendingHandler(tick);
+        if(!closeRecoveryHandlerIfSafe()) { release(tick);activity="先安全收回自有界面的鼠标物品";return null; }
+        current=mc.player.currentScreenHandler;
         if (owned != null && current == owned) {
             release(tick);
             if (inventorySyncId == owned.syncId && tick - ownedAt >= 2) return owned;
@@ -91,10 +142,8 @@ public final class BatchWorkstationAccess {
             requestedAt = -1;
             openAttempts = 0;
         }
-        boolean expected = crafting ? current instanceof CartographyTableScreenHandler : StorageBlockUtils.storageSlots(current) > 0;
+        boolean expected = expectedType(current,crafting);
         if (requestedAt >= 0 && current != mc.player.playerScreenHandler && expected) {
-            owned = current;
-            ownedAt = tick;
             release(tick);
             activity = "等待服务器同步容器物品";
             return null;
@@ -134,6 +183,7 @@ public final class BatchWorkstationAccess {
         if (tick <= aimedAt) return null;
         if (++openAttempts > 3) { failure = "服务器未打开目标界面：" + pos.toShortString(); return null; }
         face(hit.getPos());
+        requestedFromSyncId=current.syncId;
         BlockUtils.interact(hit, Hand.MAIN_HAND, true);
         requestedAt = tick;
         aimedAt = -1;
@@ -161,7 +211,11 @@ public final class BatchWorkstationAccess {
         if ((!feet.getCollisionShape(mc.world, pos).isEmpty() && !(feet.getBlock() instanceof CarpetBlock))
             || !mc.world.getBlockState(pos.up()).getCollisionShape(mc.world, pos.up()).isEmpty()) return Double.NaN;
         var below = mc.world.getBlockState(pos.down()).getCollisionShape(mc.world, pos.down());
-        if (below.isEmpty() || !mc.world.getFluidState(pos).isEmpty()) return Double.NaN;
+        var feetFluid = mc.world.getFluidState(pos);
+        var headFluid = mc.world.getFluidState(pos.up());
+        if (below.isEmpty()
+            || !LeverWaterPolicy.allowsFluid(leverWaterTravel, feetFluid.isEmpty(), feetFluid.isIn(FluidTags.WATER))
+            || !LeverWaterPolicy.allowsFluid(leverWaterTravel, headFluid.isEmpty(), headFluid.isIn(FluidTags.WATER))) return Double.NaN;
         return feet.getBlock() instanceof CarpetBlock ? pos.getY() + 0.0625
             : pos.getY() - 1 + below.getMax(Direction.Axis.Y);
     }
@@ -173,18 +227,42 @@ public final class BatchWorkstationAccess {
 
     /** 0 moving, 1 arrived, -1 no route. */
     private int navigate(BlockPos goal, long tick) {
-        if (distanceSquared(goal) < 0.04) { resetPath(tick); return 1; }
+        if (reached(goal,true)) { resetPath(tick); return 1; }
         if (!goal.equals(pathGoal)) { resetPath(tick); pathGoal = goal; }
-        if (!path.isEmpty() && tick - progressAt > 80) { path.clear(); release(tick); }
+        if (unstuckGoal != null) {
+            if (tick >= unstuckUntil || reached(unstuckGoal,false) || !direct(unstuckGoal)) {
+                unstuckGoal = null; release(tick);
+            } else {
+                face(new Vec3d(unstuckGoal.getX()+0.5,mc.player.getEyePos().y,unstuckGoal.getZ()+0.5));
+                mc.options.forwardKey.setPressed(true);Input.setKeyState(mc.options.forwardKey,true);ownsForward=true;
+                if(mc.player.isSprinting())mc.player.setSprinting(false);
+                return 0;
+            }
+        }
+        if (!path.isEmpty() && tick - progressAt > 80) {
+            path.clear(); release(tick);
+            BlockPos feet = new BlockPos(mc.player.getBlockX(),walkY,mc.player.getBlockZ());
+            for(int offset=0;offset<HORIZONTAL.length;offset++) {
+                BlockPos candidate=feet.offset(HORIZONTAL[(routeAttempts+offset)%HORIZONTAL.length]);
+                if(!Double.isFinite(surface(candidate))||!direct(candidate))continue;
+                unstuckGoal=candidate;unstuckUntil=tick+12;break;
+            }
+            if(unstuckGoal!=null)return 0;
+        }
         if (path.isEmpty()) {
             if (++routeAttempts > 3 || !plan(goal, tick)) return -1;
         }
-        while (pathIndex < path.size() && distanceSquared(path.get(pathIndex)) < 0.04) {
+        while (pathIndex < path.size() && reached(path.get(pathIndex),false)) {
             pathIndex++;
             bestDistance = Double.POSITIVE_INFINITY;
             progressAt = tick;
         }
-        if (pathIndex >= path.size()) return 1;
+        if (pathIndex >= path.size()) {
+            release(tick);
+            if(reached(goal,true))return 1;
+            path.clear();pathIndex=0;
+            return routeAttempts>3?-1:0;
+        }
         for (int i = Math.min(path.size() - 1, pathIndex + 32); i > pathIndex; i--) {
             if (direct(path.get(i))) { pathIndex = i; bestDistance = Double.POSITIVE_INFINITY; break; }
         }
@@ -243,6 +321,15 @@ public final class BatchWorkstationAccess {
         return dx * dx + dz * dz;
     }
 
+    private boolean reached(BlockPos pos,boolean endpoint) {
+        double floor=surface(pos);
+        if (LeverWaterPolicy.allowsDrift(leverWaterTravel, mc.player.isTouchingWater()))
+            return LeverWaterPolicy.reached(mc.player.getX()-pos.getX()-0.5,mc.player.getZ()-pos.getZ()-0.5,
+                floor-mc.player.getY(),Double.isFinite(floor),endpoint);
+        return MapArtNavigationPolicy.reached(mc.player.getX()-pos.getX()-0.5,mc.player.getZ()-pos.getZ()-0.5,
+            floor-mc.player.getY(),mc.player.isOnGround(),Double.isFinite(floor),endpoint);
+    }
+
     private void face(Vec3d point) {
         Vec3d delta = point.subtract(mc.player.getEyePos());
         mc.player.setYaw((float) (MathHelper.atan2(delta.z, delta.x) * 180 / Math.PI - 90));
@@ -262,19 +349,30 @@ public final class BatchWorkstationAccess {
         path.clear();
         pathIndex = 0;
         pathGoal = null;
+        unstuckGoal = null;
         routeAttempts = 0;
         bestDistance = Double.POSITIVE_INFINITY;
     }
 
+    public void resetTravel() {
+        resetPath(currentTick);travelProxy=null;stand=null;rejectedStands.clear();
+        aimedAt=approachAimedAt=-1;approachTarget=null;
+    }
+
     public void reset() {
         resetPath(currentTick);
-        if (mc.player != null && mc.player.currentScreenHandler == owned && owned.getCursorStack().isEmpty()) {
-            GameMenuScreen menu = mc.currentScreen instanceof GameMenuScreen m ? m : null;
-            closingMenu = menu != null;
-            try { mc.player.closeHandledScreen(); }
-            finally {
-                closingMenu = false;
-                if (menu != null && mc.currentScreen == null && mc.world != null) mc.setScreen(menu);
+        leverWaterTravel = false;
+        claimPendingHandler(currentTick);
+        if(mc.player!=null) {
+            ScreenHandler current=mc.player.currentScreenHandler;
+            if(current==owned) {
+                if(canCloseSafely(current))closeScreenPreservingMenu();
+                else { recoveryOwned=current;recoveryPosition=target; }
+            } else if(current!=recoveryOwned) { recoveryOwned=null;recoveryPosition=null; }
+            if(current!=owned&&requestedAt>=0&&current!=mc.player.playerScreenHandler
+                &&expectedType(current,requestedCrafting)&&target!=null) {
+                recoveryCandidate=current;recoveryCandidatePosition=target;recoveryCandidateCrafting=requestedCrafting;
+                recoveryCandidateFromSyncId=requestedFromSyncId;recoveryCandidateAt=currentTick;
             }
         }
         owned = null;
@@ -285,17 +383,65 @@ public final class BatchWorkstationAccess {
         rejectedStands.clear();
         openAttempts = 0;
         requestedAt = aimedAt = -1;
+        requestedFromSyncId = -1;
         approachAimedAt = -1;
         approachTarget = null;
         failure = null;
     }
 
+    private void closeScreenPreservingMenu() {
+        GameMenuScreen menu=mc.currentScreen instanceof GameMenuScreen m?m:null;
+        closingMenu=menu!=null;
+        try { mc.player.closeHandledScreen(); }
+        finally {
+            closingMenu=false;
+            if(menu!=null&&mc.currentScreen==null&&mc.world!=null)mc.setScreen(menu);
+        }
+    }
+
+    /** A held cursor is never closed: vanilla may otherwise drop it from a full inventory. */
+    public boolean closeRecoveryHandlerIfSafe() {
+        if(recoveryOwned==null)return true;
+        if(mc.player==null)return false;
+        if(mc.player.currentScreenHandler!=recoveryOwned) { recoveryOwned=null;recoveryPosition=null;return true; }
+        if(!canCloseSafely(recoveryOwned))return false;
+        closeScreenPreservingMenu();recoveryOwned=null;recoveryPosition=null;return true;
+    }
+
+    public boolean recoveryMatches(BlockPos pos,boolean crafting) {
+        return mc.player!=null&&mc.player.currentScreenHandler==recoveryOwned&&recoveryOwned!=null
+            &&pos.equals(recoveryPosition)&&expectedType(recoveryOwned,crafting);
+    }
+
+    private boolean canCloseSafely(ScreenHandler handler) {
+        if(!ContainerOwnershipPolicy.mayClose(owns(handler),handler.getCursorStack().isEmpty()))return false;
+        if(!(handler instanceof CartographyTableScreenHandler))return true;
+        List<ItemStack> inventory=new ArrayList<>();
+        for(int slot=0;slot<36;slot++)inventory.add(mc.player.getInventory().getStack(slot).copy());
+        for(int input=0;input<2;input++) {
+            ItemStack stack=handler.getSlot(input).getStack();int remaining=stack.getCount();
+            if(stack.isEmpty())continue;
+            for(ItemStack existing:inventory)if(ItemStack.areItemsAndComponentsEqual(existing,stack)) {
+                int moved=Math.min(remaining,Math.max(0,existing.getMaxCount()-existing.getCount()));
+                existing.increment(moved);remaining-=moved;
+            }
+            for(int slot=0;slot<inventory.size()&&remaining>0;slot++)if(inventory.get(slot).isEmpty()) {
+                int moved=Math.min(remaining,stack.getMaxCount());ItemStack parked=stack.copy();parked.setCount(moved);
+                inventory.set(slot,parked);remaining-=moved;
+            }
+            if(remaining>0)return false;
+        }
+        return true;
+    }
+
     public boolean closingMenu() { return closingMenu; }
     public boolean hidesScreen(Screen screen) {
-        return requestedAt >= 0 && (screen instanceof GenericContainerScreen
+        return (requestedAt>=0||mc.player!=null&&mc.player.currentScreenHandler==recoveryOwned) && (screen instanceof GenericContainerScreen
             || screen instanceof ShulkerBoxScreen || screen instanceof CartographyTableScreen);
     }
-    public boolean owns(ScreenHandler handler) { return owned != null && owned == handler; }
+    public boolean owns(ScreenHandler handler) { return owned!=null&&owned==handler||recoveryOwned!=null&&recoveryOwned==handler; }
+    public BlockPos ownedPosition(ScreenHandler handler) { return owned!=null&&owned==handler?target:recoveryOwned!=null&&recoveryOwned==handler?recoveryPosition:null; }
+    public boolean busyForAutoEat() { return requestedAt>=0||owned!=null||recoveryOwned!=null||recoveryCandidate!=null; }
     public int walk(BlockPos goal, long tick) {
         currentTick = tick;
         if (mc.player.currentScreenHandler != mc.player.playerScreenHandler) {
@@ -317,7 +463,25 @@ public final class BatchWorkstationAccess {
         return result;
     }
     public BlockHitResult approach(BlockPos pos, long tick) {
+        return approach(pos, tick, false);
+    }
+
+    public BlockHitResult approachLever(BlockPos pos, long tick) {
+        return approach(pos, tick, true);
+    }
+
+    private void setLeverWaterTravel(boolean enabled) {
+        if (leverWaterTravel == enabled) return;
+        resetPath(currentTick);
+        stand = null;
+        rejectedStands.clear();
+        approachAimedAt = -1;
+        leverWaterTravel = enabled;
+    }
+
+    private BlockHitResult approach(BlockPos pos, long tick, boolean waterAllowed) {
         currentTick = tick;
+        setLeverWaterTravel(waterAllowed);
         if (failure != null) return null;
         if (!pos.equals(approachTarget)) {
             approachTarget = pos.toImmutable();
@@ -342,7 +506,10 @@ public final class BatchWorkstationAccess {
         }
         release(tick);
         var velocity=mc.player.getVelocity();
-        if(tick-stoppedAt<2||velocity.x*velocity.x+velocity.z*velocity.z>0.000625)return null;
+        // Water currents do not settle like dry-ground motion. Re-raycast from the
+        // actual eye every tick; a valid in-range lever hit is sufficient in water.
+        if(tick-stoppedAt<2||!LeverWaterPolicy.allowsDrift(leverWaterTravel,mc.player.isTouchingWater())
+            &&velocity.x*velocity.x+velocity.z*velocity.z>0.000625)return null;
         face(hit.getPos());
         if (approachAimedAt < 0) { approachAimedAt = tick; return null; }
         if (tick <= approachAimedAt) return null;
