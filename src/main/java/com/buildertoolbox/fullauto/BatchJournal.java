@@ -74,6 +74,16 @@ public final class BatchJournal {
         }
     }
 
+    /** User-selected, one-based inclusive restart; retain original queue numbering. */
+    public static State startingAt(List<BatchFiles.Entry> files, int firstMap) throws IOException {
+        if (files.isEmpty() || files.size() > 100000 || firstMap < 1 || firstMap > files.size())
+            throw new IOException("开始编号必须在 1～" + files.size() + " 之间，当前为 " + firstMap);
+        State state = new State();
+        state.queue = new ArrayList<>(files);
+        state.index = firstMap - 1;
+        return state;
+    }
+
     private final Path file;
     public BatchJournal(Path file) { this.file = file; }
     public boolean exists() { return Files.exists(file); }
@@ -153,7 +163,15 @@ public final class BatchJournal {
         } finally { Files.deleteIfExists(temporary); }
     }
 
-    public void archive() throws IOException {
+    /** Keep the old live record until the new checkpoint is atomically committed. */
+    public void replace(State next) throws IOException {
+        archive(true);
+        write(next);
+    }
+
+    public void archive() throws IOException { archive(false); }
+
+    private void archive(boolean keepCurrent) throws IOException {
         if (!Files.exists(file)) return;
         if (!Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS))
             throw new IOException("进度文件不是普通文件，未执行初始化归档");
@@ -168,6 +186,15 @@ public final class BatchJournal {
                 try (var channel = java.nio.channels.FileChannel.open(older,java.nio.file.StandardOpenOption.WRITE)) { channel.force(true); }
                 copied = true;
             } finally { if (!copied) Files.deleteIfExists(older); }
+        }
+        if (keepCurrent) {
+            Path copy = Files.createTempFile(file.getParent(), "fullauto-archive-", ".tmp");
+            try {
+                Files.copy(file, copy, StandardCopyOption.REPLACE_EXISTING);
+                try (var channel = java.nio.channels.FileChannel.open(copy,java.nio.file.StandardOpenOption.WRITE)) { channel.force(true); }
+                Files.move(copy,previous,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
+            } finally { Files.deleteIfExists(copy); }
+            return;
         }
         // Preserve the live checkpoint and latest archive if this rename cannot
         // be completed atomically. Earlier archives already have unique copies.

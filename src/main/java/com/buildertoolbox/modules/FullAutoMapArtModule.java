@@ -18,11 +18,13 @@ import com.buildertoolbox.fullauto.MapArtColorFilter;
 import com.buildertoolbox.fullauto.MapArtBatchController;
 import com.buildertoolbox.fullauto.BatchPainting;
 import com.buildertoolbox.fullauto.BatchFiles;
+import com.buildertoolbox.fullauto.BatchJournal;
 import com.buildertoolbox.fullauto.BatchPrintCheckpoint;
 import com.buildertoolbox.fullauto.BatchInspection;
 import com.buildertoolbox.fullauto.OpeningBandSupply;
 import com.buildertoolbox.fullauto.WalkingProgress;
 import com.buildertoolbox.fullauto.SupplyTrip;
+import com.buildertoolbox.fullauto.SweepStride;
 import com.buildertoolbox.fullauto.StorageBlockUtils;
 import fi.dy.masa.litematica.data.DataManager;
 import java.nio.file.Path;
@@ -111,6 +113,7 @@ import org.lwjgl.glfw.GLFW;
  */
 public final class FullAutoMapArtModule extends Module implements MapArtBatchController.Host {
     private static final long EMPTY_SUPPLY_RECHECK_TICKS = 20L * 60L;
+    private static final long PRODUCING_CHEST_RECHECK_TICKS = 20L * 5L;
     private static final long PLACEMENT_CONFIRM_TICKS = 20L;
     private static final int RESTOCK_MAX_LOOKAHEAD_LANES = 2;
     private static final int MAX_PENDING_PLACEMENTS = 3;
@@ -144,8 +147,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final Setting<Boolean> selectCartography = batchSelector("Set Cartography Table", BatchLocation.TABLE);
     private final Setting<String> productStorage = batchPosition("Product Storage", "Container for this batch's locked maps. No label required.");
     private final Setting<Boolean> selectProduct = batchSelector("Set Product Storage", BatchLocation.PRODUCT);
+    private final Setting<Integer> resetStartMap = sgBatch.add(new IntSetting.Builder()
+        .name("Reset Start Map")
+        .description("1-based position in the naturally sorted folder, inclusive. Used only by Reset Batch / Validate; changing it does not move an existing batch. The selected picture will be cleared and rebuilt on start.")
+        .defaultValue(1).range(1, 100000).sliderRange(1, 100).build());
     private final Setting<Boolean> resetBatch = sgBatch.add(new BoolSetting.Builder()
-        .name("Reset Batch").description("Archive the previous checkpoint and prepare a new batch. Does not trigger the lever.")
+        .name("Reset Batch").description("Validate the folder and rebuild from Reset Start Map (inclusive). Archives the old checkpoint; no lever action until enabled again.")
         .defaultValue(false).onChanged(this::onBatchReset).build());
 
     // Persist through Meteor profiles, but present these in the color table
@@ -245,12 +252,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         .build()
     );
 
-    private final Setting<Integer> walkPace = sgNavigation.add(new IntSetting.Builder()
-        .name("Walk Speed (%)")
-        .description("Percentage of normal walking time used while following a route. Does not control placement speed.")
-        .defaultValue(100)
-        .range(25, 100)
-        .sliderRange(25, 100)
+    private final Setting<Boolean> sprintToSupply = sgNavigation.add(new BoolSetting.Builder()
+        .name("Sprint To Supply")
+        .description("Sprint on safe outbound routes to material chests. Printing and return trips still walk normally.")
+        .defaultValue(true)
+        .onChanged(enabled -> { if (!enabled) releaseSupplySprint(); })
         .build()
     );
 
@@ -285,15 +291,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final NavigableMap<Integer, ProjectionTarget> remainingTargets = new TreeMap<>();
     private final Map<BlockPos, Long> dispatchedPlacements = new HashMap<>();
     // An empty supply is remembered only briefly. This prevents running back
-    // to a known-empty chest for every target while still retrying after a
-    // player has had a chance to refill it.
+    // to unconfirmed sources for every target while allowing a later retry.
     private final Map<Item, Long> emptySupplyUntil = new HashMap<>();
-    private final Map<Item, Long> shortSupplyUntil = new HashMap<>();
-    private final Map<BlockPos, Long> emptySupplyChestUntil = new HashMap<>();
     // A matching stack can exist but be too large for the currently unreserved
-    // inventory space. Keep that separate from the 60-second no-supply marker.
+    // inventory space. Capacity failures are not chest availability failures.
     private final Map<Item, Integer> minimumTakeCapacity = new HashMap<>();
-    private final Map<Item, Long> capacityRecheckAt = new HashMap<>();
     private final List<BlockPos> path = new ArrayList<>();
     private final Set<BlockPos> avoidedRouteCells = new HashSet<>();
     private final List<BlockPos> snakeWaypoints = new ArrayList<>();
@@ -318,6 +320,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private int supplyAmount;
     private int reservedSupplySlots;
     private int supplyReceivedThisRound;
+    private long supplyLastTakeTick = -1;
     private BlockPos supplyChest;
     private Item supplyChestLabel;
     private BlockPos supplyStand;
@@ -348,7 +351,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     // The module may only clear a key state it set itself. This keeps idle
     // states, menus and chest registration from cancelling manual movement.
     private boolean ownsForwardKey;
-    private double walkPaceAccumulator;
+    private boolean ownsSupplySprintKey;
     private long tick;
     private long lastStatusMessageNanos;
     private final MapArtProgressTimer progressTimer = new MapArtProgressTimer();
@@ -394,6 +397,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private long navigationReleaseUntil;
     private final WalkingProgress walkingProgress = new WalkingProgress();
     private long lastMovementReleaseTick = -100;
+    private final SweepStride sweepStride = new SweepStride();
     private double lastPathDistance = Double.POSITIVE_INFINITY;
     private boolean updatingSupplyList;
     private boolean backgroundPauseOverridden;
@@ -420,10 +424,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         WSection validation = root.add(theme.section("Schematic Directory Validation", true)).expandX().widget();
         WLabel validationStatus = validation.add(theme.label(directoryValidationStatus)).widget();
         WButton validate = validation.add(theme.button("Validate / Reinitialize")).widget();
-        validate.tooltip = "Stops the current run, validates this folder and resets the saved batch. The same files start again from picture 1.";
+        validate.tooltip = "Stops the current run, validates this folder and resets the saved batch from Reset Start Map (inclusive).";
         validate.action = () -> validateBatchDirectory(validationStatus);
         validation.add(theme.label("Relative to schematics; Chinese paths supported, e.g. 地图画/风景合集 (Ctrl+V)."));
-        validation.add(theme.label("Validation resets batch progress, even for the same files. Enable the module afterward."));
+        validation.add(theme.label("Set Reset Start Map above (1-based, inclusive). Validation resets progress; enable afterward."));
+        validation.add(theme.label("Earlier pictures are skipped. The selected picture is cleared and rebuilt, not resumed."));
         validation.add(theme.label("Checks file access only; blueprint dimensions/alignment are checked on batch start."));
         WSection section = theme.section("Color Filter - checked colors are skipped", true);
         root.add(section).expandX();
@@ -474,10 +479,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void validateBatchDirectory(WLabel label) {
         if (validatingDirectory) {
-            label.set(directoryValidationStatus);
+            if (label != null) label.set(directoryValidationStatus);
             return;
         }
         String input = batchFolder.get();
+        int firstMap = resetStartMap.get();
         Path base = DataManager.getSchematicsBaseDirectory();
         String context = directoryValidationContext();
         long request = ++directoryValidationGeneration;
@@ -486,11 +492,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         // successful validation is preparing to replace its checkpoint.
         if (isActive()) disable();
         directoryValidationStatus = "已停止当前批次，正在检测目录并准备重新初始化…";
-        label.set(directoryValidationStatus);
+        if (label != null) label.set(directoryValidationStatus);
         CompletableFuture.supplyAsync(() -> {
             try {
                 Path folder = BatchFiles.directory(base, input);
                 List<BatchFiles.Entry> files = BatchFiles.inspectDirectory(folder);
+                if (!files.isEmpty()) BatchJournal.startingAt(files, firstMap);
                 return new DirectoryValidation(folder, files);
             } catch (Exception exception) {
                 throw new java.util.concurrent.CompletionException(exception);
@@ -498,7 +505,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }).whenComplete((result, failure) -> mc.execute(() -> {
             if (request != directoryValidationGeneration) return;
             validatingDirectory = false;
-            if (!input.equals(batchFolder.get()) || !context.equals(directoryValidationContext())) {
+            if (!input.equals(batchFolder.get()) || firstMap != resetStartMap.get() || !context.equals(directoryValidationContext())) {
                 directoryValidationStatus = "目录、配置或游戏环境已变化，请重新检测；旧进度保留";
             } else if (failure != null) {
                 Throwable cause = failure;
@@ -508,19 +515,20 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             } else if (result.files().isEmpty()) {
                 directoryValidationStatus = "发现 0 个 .litematic 文件；未重新初始化，旧进度保留";
                 warning("%s", directoryValidationStatus);
-            } else if (!batch.reset()) {
+            } else if (!batch.reset(result.folder(), result.files(), firstMap)) {
                 directoryValidationStatus = "目录可读：" + result.files().size() + " 张；初始化未执行，详见批次提示";
             } else {
                 resetRuntime();
                 state = TaskState.IDLE;
-                activity = "已重新初始化，开启模块后从第 1 张开始";
-                directoryValidationStatus = "已重新初始化：" + result.files().size() + " 张，开启模块从第 1 张开始";
+                activity = "已重新初始化，开启模块从第 " + firstMap + " 张开始（包含）";
+                directoryValidationStatus = "已重新初始化：第 " + firstMap + " / " + result.files().size()
+                    + " 张（含）：" + result.files().get(firstMap - 1).name();
                 info("%s；路径：%s。相同文件也按新批次处理，旧记录已归档。", directoryValidationStatus, result.folder());
                 if (!result.files().isEmpty()) info("自然排序预览：%s%s",
                     result.files().stream().limit(5).map(BatchFiles.Entry::name).collect(java.util.stream.Collectors.joining(", ")),
                     result.files().size() > 5 ? " …" : "");
             }
-            label.set(directoryValidationStatus);
+            if (label != null) label.set(directoryValidationStatus);
         }));
     }
 
@@ -893,10 +901,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         containers.add(container.toImmutable());
         emptySupplyUntil.remove(item);
-        shortSupplyUntil.remove(item);
         minimumTakeCapacity.remove(item);
-        capacityRecheckAt.remove(item);
-        emptySupplyChestUntil.remove(container);
         supplyTrip.forget(container);
         updateSupplyList();
         info("Supply chest registered: %s -> %s", item.getName().getString(), container.toShortString());
@@ -1013,10 +1018,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (updatingSupplyList) return;
         supplies.clear();
         emptySupplyUntil.clear();
-        shortSupplyUntil.clear();
-        emptySupplyChestUntil.clear();
         minimumTakeCapacity.clear();
-        capacityRecheckAt.clear();
         supplyTrip.clear();
         for (String entry : entries) {
             String[] parts = entry.split(" -> ", 2);
@@ -1088,6 +1090,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyChestLabel = null;
         reservedSupplySlots = 0;
         supplyReceivedThisRound = 0;
+        supplyLastTakeTick = -1;
         supplyOpenTick = -1;
         supplyOpenSyncId = -1;
         supplyAimTick = -1;
@@ -1223,10 +1226,6 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         // Supply return is movement-only; keep the computed band materials untouched.
         if (holdForPlacementConfirmation()) return;
-        if (tick - lastPlacementDispatchTick < 2) {
-            releaseMovement();
-            return;
-        }
         NavigationResult route = navigateTo(restockReturnPos);
         if (route == NavigationResult.ARRIVED || route == NavigationResult.UNREACHABLE) {
             finishReturnToWork();
@@ -1267,7 +1266,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             if (entering || tick >= nextLocalSupplyCheckTick) {
                 if (entering) supplyCheckedLane = activeLane;
                 nextLocalSupplyCheckTick = tick + 5;
-                ProjectionTarget shortage = findRestockTargetInWindow(activeLane,!entering,!entering);
+                // During a sweep, use reachable stock before interrupting the
+                // centerline for a missing color in the same few columns.
+                ProjectionTarget shortage = entering || selectReachableMatrixTarget(activeLane) == null
+                    ? findRestockTargetInWindow(activeLane,!entering,!entering) : null;
                 if (shortage != null) {
                     nextLocalSupplyCheckTick = tick + 40;
                     beginRestock(shortage);
@@ -1290,16 +1292,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         ProjectionTarget nearby = activeLane == null || activeLane < 0
             ? null : selectReachableMatrixTarget(activeLane);
-        if (nearby != null) {
+        if (nearby != null && !canContinueSweepStride(activeLane)) {
             if (tick >= nextActionTick) placeTarget(nearby);
             else releaseMovement();
             return;
         }
         if (holdForPlacementConfirmation()) return;
-        if (tick - lastPlacementDispatchTick < 2) {
-            releaseMovement();
-            return;
-        }
         if (snakeWaypointIndex >= snakeWaypoints.size()) {
             if (!dispatchedPlacements.isEmpty()) {
                 releaseMovement();
@@ -1315,6 +1313,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         // Like Once, keep one continuous centerline goal per band. Nearby cells
         // are placed above; do not interrupt travel with periodic repair stops.
         NavigationResult result = navigateTo(waypoint);
+        if (result == NavigationResult.MOVING && ownsForwardKey) {
+            sweepStride.begin(mc.player.getX(), mc.player.getZ(), tick);
+        }
         if (result == NavigationResult.ARRIVED || result == NavigationResult.UNREACHABLE) {
             if (activeLane != null && finishSnakeBand(activeLane)) return;
             if (result == NavigationResult.UNREACHABLE) {
@@ -1328,6 +1329,39 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         activity = "蛇形扫描：" + Math.min(snakeWaypointIndex + 1, snakeWaypoints.size())
             + "/" + snakeWaypoints.size() + " 路点";
+    }
+
+    /** Group tiny stop/start cycles into short straight steps without losing edge cells. */
+    private boolean canContinueSweepStride(Integer lane) {
+        if (lane == null || lane < 0 || !ownsForwardKey || !mc.player.isOnGround()
+            || !dispatchedPlacements.isEmpty() || printer.hasQueuedProjectionPlacement()
+            || snakeWaypointIndex >= snakeWaypoints.size() || pathIndex >= path.size()) return false;
+        double remaining = sweepStride.remaining(mc.player.getX(), mc.player.getZ(), tick);
+        if (remaining <= 0) return false;
+        BlockPos goal = snakeWaypoints.get(snakeWaypointIndex);
+        BlockPos next = path.get(pathIndex);
+        // Only optimize straight centerline travel. Turns, obstacle detours,
+        // recovery nudges and endpoints retain the existing stop/place flow.
+        double dx = goal.getX() + 0.5 - mc.player.getX();
+        if (Math.abs(dx) <= remaining + 0.4 || Math.abs(mc.player.getZ() - goal.getZ() - 0.5) > 0.2
+            || next.getZ() != goal.getZ() || (next.getX()+0.5-mc.player.getX()) * dx <= 0
+            || !canWalkDirectlyTo(next)) return false;
+        Vec3d eye = mc.player.getEyePos();
+        // Include a braking margin and possible centerline correction.
+        Vec3d futureEye = new Vec3d(eye.x + Math.copySign(remaining + 0.2, dx), eye.y, goal.getZ()+0.5);
+        int radius = (int) Math.ceil(placeRange.get());
+        BlockPos feet = mc.player.getBlockPos();
+        for (int x=feet.getX()-radius; x<=feet.getX()+radius; x++) {
+            for (int z=feet.getZ()-radius; z<=feet.getZ()+radius; z++) {
+                Integer index = targetIndices.get(new BlockPos(x,walkY,z));
+                ProjectionTarget target = index == null ? null : remainingTargets.get(index);
+                if (target == null || target.lane() != lane || blockedTargets.contains(target.pos())) continue;
+                Vec3d aim = placementAim(target);
+                if (SweepStride.wouldLeaveReach(eye.squaredDistanceTo(aim), futureEye.squaredDistanceTo(aim), placeRange.get())
+                    && !isSatisfied(target)) return false;
+            }
+        }
+        return true;
     }
 
     private void tickSnakeTurn() {
@@ -1598,15 +1632,16 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private boolean hasRemainingWorkInLane(int lane) {
-        // Another player can finish a band before we get there. Refresh it
-        // from the shared world before deciding to walk or restock for it.
-        boolean unfinished = false;
+        // The background observation pass maintains this matrix. Inspect the
+        // entire lane only once it appears empty, rather than querying every
+        // block in the lane on every movement tick.
+        for (ProjectionTarget target : remainingTargets.values())
+            if (target.lane() == lane) return true;
         for (ProjectionTarget target : targets) {
             if (target.lane() != lane) continue;
-            boolean satisfied = isSatisfied(target);
-            if (!satisfied) unfinished = true;
+            if (!isSatisfied(target)) return true;
         }
-        return unfinished;
+        return false;
     }
 
     /** Reconcile every cell, including cells removed from the queue by an earlier observation. */
@@ -2081,6 +2116,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyItem = selected;
         reservedSupplySlots = plan.reservedForOthers(selected);
         supplyReceivedThisRound = 0;
+        supplyLastTakeTick = -1;
         int capacity = inventoryCapacity(selected, reservedSupplySlots);
         supplyAmount = Math.min(capacity, Math.max(0, plan.desired().get(selected) - countInventory(selected)));
         info("就近备料 %s：最近箱 %s，距离 %.1f 格，背包已有 %d，本趟补入 %d（整组取货）。",
@@ -2106,29 +2142,24 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private boolean hasUsableSupply(Item item, int reserved) {
         if (isSupplyTemporarilyDeferred(item)) return false;
-        Integer minimum = minimumTakeCapacity.get(item);
-        if (minimum != null) {
-            if (inventoryCapacity(item, reserved) < minimum
-                && tick < capacityRecheckAt.getOrDefault(item, tick)) return false;
-            minimumTakeCapacity.remove(item);
-            capacityRecheckAt.remove(item);
-        }
+        // Producers are stocked with whole stacks. A few free merge slots
+        // cannot justify a trip to another equivalent chest. Capacity, not
+        // elapsed time, determines when this color becomes restockable again.
+        if (!canTakeSupplyStack(item, reserved)) return false;
+        minimumTakeCapacity.remove(item);
         return supplies.getOrDefault(item, List.of()).stream()
             .anyMatch(pos -> !isSupplyChestUnavailable(pos));
     }
 
-    private boolean isSupplyChestTemporarilyEmpty(BlockPos pos) {
-        Long until = emptySupplyChestUntil.get(pos);
-        if (until == null) return false;
-        if (tick < until) return true;
-        emptySupplyChestUntil.remove(pos);
-        return false;
+    private boolean canTakeSupplyStack(Item item, int reserved) {
+        int minimum = Math.max(new ItemStack(item).getMaxCount(), minimumTakeCapacity.getOrDefault(item, 0));
+        return inventoryCapacity(item, reserved) >= minimum;
     }
 
     private boolean isSupplyChestUnavailable(BlockPos pos) {
         Long until = unreachableSupplyUntil.get(pos);
         if (until != null && tick >= until) { unreachableSupplyUntil.remove(pos); until = null; }
-        return isSupplyChestTemporarilyEmpty(pos) || until != null;
+        return until != null;
     }
 
     private void deferSupplyChest(String reason) {
@@ -2166,7 +2197,6 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void rememberTakeCapacity(Item item, int minimum) {
         minimumTakeCapacity.merge(item, minimum, Math::min);
-        capacityRecheckAt.put(item, tick + EMPTY_SUPPLY_RECHECK_TICKS);
     }
 
     private int reservedSlotsForOtherColors(Item selected, Set<Item> needed, Set<Item> heldItems) {
@@ -2244,22 +2274,19 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void markSupplyTemporarilyEmpty(Item item) {
-        emptySupplyUntil.put(item, tick + EMPTY_SUPPLY_RECHECK_TICKS);
+        emptySupplyUntil.put(item, tick + PRODUCING_CHEST_RECHECK_TICKS);
     }
 
     private boolean isSupplyTemporarilyDeferred(Item item) {
         Long emptyUntil = emptySupplyUntil.get(item);
-        Long shortUntil = shortSupplyUntil.get(item);
         if (emptyUntil != null && tick >= emptyUntil) emptySupplyUntil.remove(item);
-        if (shortUntil != null && tick >= shortUntil) shortSupplyUntil.remove(item);
-        return (emptyUntil != null && tick < emptyUntil) || (shortUntil != null && tick < shortUntil);
+        return emptyUntil != null && tick < emptyUntil;
     }
 
     private boolean hasPendingSupplyRecheck() {
         emptySupplyUntil.entrySet().removeIf(entry -> tick >= entry.getValue());
-        shortSupplyUntil.entrySet().removeIf(entry -> tick >= entry.getValue());
         unreachableSupplyUntil.entrySet().removeIf(entry -> tick >= entry.getValue());
-        return !emptySupplyUntil.isEmpty() || !shortSupplyUntil.isEmpty() || !unreachableSupplyUntil.isEmpty();
+        return !emptySupplyUntil.isEmpty() || !unreachableSupplyUntil.isEmpty();
     }
 
     private void beginSupplyRecheckWait() {
@@ -2289,7 +2316,6 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (hasPendingSupplyRecheck() || tick < supplyRetryAt) {
             long nextCheck = java.util.stream.LongStream.of(
                 emptySupplyUntil.values().stream().mapToLong(Long::longValue).min().orElse(Long.MAX_VALUE),
-                shortSupplyUntil.values().stream().mapToLong(Long::longValue).min().orElse(Long.MAX_VALUE),
                 unreachableSupplyUntil.values().stream().mapToLong(Long::longValue).min().orElse(Long.MAX_VALUE),
                 tick < supplyRetryAt ? supplyRetryAt : Long.MAX_VALUE).min().orElse(tick+20);
             long seconds = Math.max(1, (nextCheck - tick + 19) / 20);
@@ -2496,17 +2522,20 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (supplyItem == null || supplyAmount <= 0) {
             if (supplyItem != null) {
                 emptySupplyUntil.remove(supplyItem);
-                shortSupplyUntil.remove(supplyItem);
                 minimumTakeCapacity.remove(supplyItem);
-                capacityRecheckAt.remove(supplyItem);
             }
             continueRestock();
             return;
         }
 
         if (supplyChest == null) {
-            // Choose again after every chest: the nearest remaining chest can
-            // change as the player moves, and registration order is arbitrary.
+            if (!canTakeSupplyStack(supplyItem, reservedSupplySlots)) {
+                activity = "空间不足以装下一整组，继续其它颜色或返回铺设";
+                continueRestock();
+                return;
+            }
+            // Retry an equivalent source only for an actual access/transfer
+            // failure, never because this inventory cannot fit its stacks.
             BlockPos nearest = supplies.getOrDefault(supplyItem, List.of()).stream()
                 .filter(pos -> !supplyTrip.visited(pos) && !isSupplyChestUnavailable(pos))
                 .min(Comparator.comparingDouble(this::distanceToPlayer))
@@ -2520,11 +2549,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                     activity = "同色箱暂不可达，先继续其他颜色，冷却后自动重试";
                     warning("%s 的箱子存在寻路/开箱失败，未记为无货；先处理其他条带。", supplyItem.getName().getString());
                 } else {
-                    if (supplyReceivedThisRound == 0) markSupplyTemporarilyEmpty(supplyItem);
-                    else shortSupplyUntil.put(supplyItem, tick + EMPTY_SUPPLY_RECHECK_TICKS);
-                    activity = supplyReceivedThisRound == 0
-                        ? "所有同色箱均未取到材料，60 秒后复查" : "本轮已取到部分材料，但尚未补足";
-                    warning("已尝试所有登记的 %s 箱，本轮取到 %d 个、仍缺 %d 个；60 秒后复查，先铺其它颜色。",
+                    markSupplyTemporarilyEmpty(supplyItem);
+                    activity = "登记箱取货未确认，5 秒后复查";
+                    warning("已尝试可用的 %s 箱，本轮取到 %d 个、本趟计划尚余 %d 个；先铺背包材料，再复查生产箱。",
                         supplyItem.getName().getString(), supplyReceivedThisRound, supplyAmount);
                 }
                 continueRestock();
@@ -2536,15 +2563,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             supplyTrip.visit(nearest);
             info("补货 %s：前往最近的未尝试箱子 %s；本轮还需 %d 个。",
                 supplyItem.getName().getString(), nearest.toShortString(), supplyAmount);
-            supplyChestLabel = findNearestLabelItem(supplyChest, 4);
-            Identifier wantedId = Registries.ITEM.getId(supplyItem);
-            Identifier labelId = supplyChestLabel == null ? null : Registries.ITEM.getId(supplyChestLabel);
-            if (labelId == null || !labelId.equals(wantedId)) {
-                warning("补给箱 %s 的标签物品 ID 与所需 %s 不一致，已跳过。", supplyChest.toShortString(), wantedId);
-                supplyChest = null;
-                supplyChestLabel = null;
-                return;
-            }
+            // Remote item frames may not be loaded yet. Travel using the
+            // registered ID; validate the live label and slot IDs on arrival.
+            supplyChestLabel = supplyItem;
             supplyStand = null;
             rejectedSupplyStands.clear();
             supplyOpenTick = -1;
@@ -2642,8 +2663,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 supplyProgressTick = tick;
                 supplyAmount -= moved;
                 supplyReceivedThisRound += moved;
+                supplyLastTakeTick = tick;
                 resetRestockTransfer();
-                nextActionTick = tick + 3;
+                nextActionTick = tick + 1;
                 activity = "已取到 " + moved + " 个 " + supplyItem.getName().getString();
                 return;
             }
@@ -2707,11 +2729,16 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 return;
             }
         }
+        if (!matchingStockPresent && tick - (supplyLastTakeTick >= 0 ? supplyLastTakeTick : supplyInventoryReadyTick) < 20) {
+            activity = "等待生产箱补入下一组材料";
+            return;
+        }
         if (!matchingStockPresent) {
-            // A partially stocked chest is used until its exact item runs out.
-            // Remember only genuinely exhausted chests, not stacks that are
-            // temporarily too large for the reserved inventory capacity.
-            emptySupplyChestUntil.put(supplyChest.toImmutable(), tick + EMPTY_SUPPLY_RECHECK_TICKS);
+            // A registered producer is expected to be stocked. If the fully
+            // synchronized view stays empty, treat it as an access/sync failure,
+            // not as a different kind of same-color box.
+            deferSupplyChest("已同步库存中未显示登记物品");
+            return;
         } else {
             rememberTakeCapacity(supplyItem, smallestMatchingStack);
         }
@@ -2719,7 +2746,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyChest = null;
         resetRestockTransfer();
         resetNavigation();
-        activity = matchingStockPresent ? "当前背包空间不足，尝试同色下一箱" : "当前箱子的所需材料已取尽，尝试同色下一箱";
+        activity = "当前背包空间装不下整组；先使用背包现货";
+        continueRestock();
     }
 
     private void refreshSupplyAmount() {
@@ -3006,8 +3034,24 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             lastProgressTick = tick;
         }
         faceToward(next);
-        pressForward();
+        pressForward(shouldSprintToSupply(next));
         return NavigationResult.MOVING;
+    }
+
+    private boolean shouldSprintToSupply(BlockPos next) {
+        if (!sprintToSupply.get()) return false;
+        // Sprint only on the outbound material trip, never while printing,
+        // returning to the canvas, opening a chest or performing a recovery nudge.
+        if (state != TaskState.RESTOCK || returningFromRestock || supplyChest == null
+            || navigationNudge != null || tick < navigationReleaseUntil || supplyOpenTick >= 0
+            || mc.player.currentScreenHandler != mc.player.playerScreenHandler
+            || !mc.player.isOnGround() || mc.player.isSneaking() || mc.player.isUsingItem()
+            || mc.player.isTouchingWater() || mc.player.horizontalCollision
+            || !mc.player.isCreative() && mc.player.getHungerManager().getFoodLevel() <= 6) return false;
+        // Brake well before interaction range and before short turns. The
+        // navigation layer has already smoothed this into a visible safe leg.
+        return horizontalDistanceSquared(supplyChest) > 36.0
+            && horizontalDistanceSquared(next) > 9.0 && canWalkDirectlyTo(next);
     }
 
     private boolean planPath(BlockPos goal) {
@@ -3207,25 +3251,34 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void pressForward() {
+        pressForward(false);
+    }
+
+    private void pressForward(boolean sprintToSupply) {
         if (mc.options == null) return;
-        if (walkPace.get() < 100) {
-            walkPaceAccumulator += walkPace.get() / 100.0;
-            if (walkPaceAccumulator < 1.0) {
-                releaseMovement();
-                return;
-            }
-            walkPaceAccumulator -= 1.0;
-        } else {
-            walkPaceAccumulator = 0;
-        }
         setKeyPressed(mc.options.forwardKey, true);
         ownsForwardKey = true;
-        // The worker never initiates sprinting: normal walking keeps the
-        // player from overrunning the thin carpet edge during placement.
-        if (mc.player != null && mc.player.isSprinting()) mc.player.setSprinting(false);
+        if (sprintToSupply) {
+            setKeyPressed(mc.options.sprintKey, true);
+            ownsSupplySprintKey = true;
+            mc.player.setSprinting(true);
+        } else {
+            releaseSupplySprint();
+            // Construction and precise approaches retain normal walking.
+            if (mc.player != null && mc.player.isSprinting()) mc.player.setSprinting(false);
+        }
+    }
+
+    private void releaseSupplySprint() {
+        if (!ownsSupplySprintKey) return;
+        if (mc.options != null) setKeyPressed(mc.options.sprintKey, false);
+        if (mc.player != null) mc.player.setSprinting(false);
+        ownsSupplySprintKey = false;
     }
 
     private void releaseMovement() {
+        releaseSupplySprint();
+        sweepStride.reset();
         if (ownsForwardKey) lastMovementReleaseTick = tick;
         if (ownsForwardKey && mc.options != null) {
             setKeyPressed(mc.options.forwardKey, false);
@@ -3248,7 +3301,6 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         cursorSpaceTarget = null; cursorSpaceStand = cursorSpaceOrigin = null;
         cursorSpaceReturning = false; cursorSpacePlanAt = 0; cursorSpaceRejected.clear(); cursorSpaceRejectedStands.clear();
         cancelQueuedPlacements();
-        walkPaceAccumulator = 0;
         workingBandWidth = 1;
         workOrigin = null;
         workGoalTarget = null;
@@ -3266,10 +3318,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         remainingTargets.clear();
         dispatchedPlacements.clear();
         emptySupplyUntil.clear();
-        shortSupplyUntil.clear();
-        emptySupplyChestUntil.clear();
         minimumTakeCapacity.clear();
-        capacityRecheckAt.clear();
         supplyTrip.clear();
         resetNavigation();
         targetIndex = 0;
@@ -3279,6 +3328,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyAmount = 0;
         reservedSupplySlots = 0;
         supplyReceivedThisRound = 0;
+        supplyLastTakeTick = -1;
         supplyChest = null;
         supplyChestLabel = null;
         supplyStand = null;
@@ -3379,19 +3429,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void onBatchReset(boolean enabled) {
         if (!enabled) return;
-        directoryValidationGeneration++;
-        validatingDirectory = false;
-        directoryValidationStatus = "目录检测已取消，正在重置批次";
-        batchStopWorker();
-        if (batch.reset()) {
-            resetRuntime();
-            state = TaskState.IDLE;
-            activity = "已重新初始化，开启模块后从第 1 张开始";
-            directoryValidationStatus = "批次已重新初始化，开启模块后从第 1 张开始";
-        } else {
-            directoryValidationStatus = "初始化未执行，旧进度保留；详见批次提示";
-        }
         resetBatch.set(false);
+        validateBatchDirectory(null);
     }
 
     private void beginBatchSelection(BatchLocation location) {

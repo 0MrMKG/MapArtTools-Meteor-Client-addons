@@ -210,9 +210,17 @@ public final class MapArtBatchController {
         cursorRecovery.reset();
     }
 
-    public boolean reset() {
+    public boolean reset(Path selectedFolder, List<BatchFiles.Entry> files, int firstMap) {
         BatchJournal.State existing=null;
         try {
+            // Validate the new start before touching the current checkpoint.
+            BatchJournal.State replacement=BatchJournal.startingAt(files,firstMap);
+            if(mc.player==null||mc.world==null)throw new IOException("请进入游戏后重建批次，以保存服务器/存档与维度");
+            Configuration selectedConfig=host.batchConfiguration();selectedConfig.validate();
+            if(!selectedFolder.equals(BatchFiles.directory(DataManager.getSchematicsBaseDirectory(),selectedConfig.folder())))
+                throw new IOException("蓝图目录已变化，请重新检测");
+            replacement.world=world();replacement.dimension=dimension();replacement.folder=selectedFolder.toString();
+            replacement.configuration=selectedConfig.signature();replacement.locations=selectedConfig.locations();
             // Unlike ordinary stop(), initialization must fail if saving the
             // latest authoritative phase fails; never archive an older phase.
             if(stopSaveFailure!=null)throw new IOException("最近一次停止时保存失败，尚不能安全初始化；请先恢复并成功保存当前批次",stopSaveFailure);
@@ -225,8 +233,11 @@ public final class MapArtBatchController {
             // Check again after releasing it before archiving ownership data.
             String after=resetOwnershipProblem(existing);
             if(after!=null)throw new IOException(after);
-            journal.archive();job=null;painting=null;status="批次已重新初始化；最新旧记录保留为 .previous，更早归档保留为独立 .bak";
+            journal.replace(replacement);job=replacement;painting=null;config=selectedConfig;folder=selectedFolder;
+            status="批次已重新初始化：第 "+firstMap+" / "+files.size()+" 张（含）："+files.get(firstMap-1).name()
+                +"；起点已保存，旧记录已归档；开启后重新清理并制作所选地图";
             host.batchPauseWorker(status);
+            host.batchMessage(status);
             return true;
         }catch(Exception exception){
             stopRuntime();host.batchStopWorker();

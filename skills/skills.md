@@ -1,6 +1,6 @@
 # Builder Toolbox：功能与实现说明
 
-整理日期：2026-10-24。对应当前工作区源码，插件版本 `5.0`，目标 Minecraft `1.21.11`。
+整理日期：2026-10-25。对应当前工作区源码，插件版本 `6.0`，目标 Minecraft `1.21.11`。
 
 本文用于了解当前功能、操作方式、实现结构和维护边界。以实际注册入口和源码为准，不把历史需求、已删除功能或尚未实测的设想写成现有能力。下文源码路径均相对于本工程根目录。
 
@@ -390,9 +390,9 @@ Java 业务文件均在 `src/main/java/com/buildertoolbox/` 下：
 .\gradlew.bat regressionTest --offline --no-daemon
 ```
 
-`--offline` 要求依赖已缓存；首次配置环境时不能假定离线命令一定可用。分发包为 `build/libs/builder_toolbox-5.0.jar`，与目标版本 Meteor 等依赖一起安装；不要把 sources JAR 当游戏模组包。
+`--offline` 要求依赖已缓存；首次配置环境时不能假定离线命令一定可用。分发包为 `build/libs/builder_toolbox-6.0.jar`，与目标版本 Meteor 等依赖一起安装；不要把 sources JAR 当游戏模组包。
 
-`build.gradle.kts` 已把 `tests/java` 的独立 Java 回归接入 `check/build`。当前有 27 组，覆盖：
+`build.gradle.kts` 已把 `tests/java` 的独立 Java 回归接入 `check/build`。当前有 29 组，覆盖：
 
 - 补货需求、槽位预算、整组容量、反向蛇形及条带覆盖。
 - Full Mode 两条带联合需求、返程颜色槽位、库存扣减、末尾单带；宽范围扫描额度、服务器版本门槛及恢复游标回退。

@@ -56,6 +56,22 @@ public final class SupplyTripTest {
         check(transfer.indexOf("supplyInventorySyncId != opened.syncId") < transfer.indexOf("boolean matchingStockPresent")
             &&transfer.contains("tick-supplyInventoryReadyTick < 2")&&code.contains("inventory.syncId() > 0"),
             "opening a handler without its full inventory must never be classified as an empty chest");
+        check(!select.contains("returnBeforeDistantSource")&&!code.contains("partialSupplyUntilUsed"),
+            "a partial take must not abandon remaining planned colors or block refilling after space is freed");
+        String eligibility=section(code,"private boolean hasUsableSupply(Item item, int reserved)","private boolean isSupplyChestUnavailable(");
+        check(eligibility.contains("canTakeSupplyStack(item, reserved)")
+            &&eligibility.contains("new ItemStack(item).getMaxCount()")
+            &&eligibility.contains("inventoryCapacity(item, reserved) >= minimum")
+            &&!code.contains("capacityRecheckAt"),
+            "whole-stack space is required before dispatch; unchanged capacity cannot expire by time");
+        check(transfer.indexOf("if (!canTakeSupplyStack(supplyItem, reservedSupplySlots))") < transfer.indexOf("BlockPos nearest ="),
+            "capacity is checked before travelling to another same-color box");
+        check(transfer.contains("supplyChestLabel = supplyItem;")
+            &&transfer.indexOf("findNearestLabelItem(") > transfer.indexOf("if (opened == null) {")
+            &&transfer.contains("labelId.equals(registeredId)")&&transfer.contains("labelId.equals(requiredId)"),
+            "unloaded remote frames cannot skip a source; live label IDs must still be verified on arrival");
+        check(transfer.contains("已同步库存中未显示登记物品")&&!transfer.contains("emptySupplyChestUntil"),
+            "equivalent producer boxes are not assigned different stock priorities");
         System.out.println("SupplyTrip: near production area first, fallback, frozen quotas, cross-color visits, slot reservations and worker wiring passed.");
     }
     private static String section(String code,String from,String to){int a=code.indexOf(from),b=code.indexOf(to,a+from.length());check(a>=0&&b>a,"source section");return code.substring(a,b);}
