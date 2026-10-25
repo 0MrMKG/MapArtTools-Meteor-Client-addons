@@ -39,12 +39,18 @@ public final class RoundTripSupplyTest {
         String source=Files.readString(Path.of("src/main/java/com/buildertoolbox/modules/FullAutoMapArtModule.java"));
         check(source.contains("RESTOCK_MAX_LOOKAHEAD_LANES = 2")&&source.contains("planRoundTrip(materialBands, inventory, empty)"),"use paired demand in Full Mode");
         String snake=section(source,"private void tickSnakeWork()","private void tickSnakeTurn()");
-        check(snake.contains("serviceSupplyWindowBoundary()")&&snake.contains("findStockedWindowTarget() == null"),"restock only when the fixed pair has no useful stock");
-        check(!snake.contains("supplyCheckedLane != activeLane")&&!source.contains("findRestockTargetInLane("),"no per-band mandatory top-up");
-        String boundary=section(source,"private boolean serviceSupplyWindowBoundary()","private boolean hasRemainingWorkInLane(");
-        check(boundary.contains("snakeWaypointIndex = index")&&boundary.contains("beginRestock(shortage)"),"deferred holes revisited before next pair");
+        check(snake.contains("serviceSupplyWindowBoundary()")&&snake.contains("findStockedWindowTarget() == null"),"empty pair still has a fallback supply trigger");
+        check(snake.contains("supplyCheckedLane != activeLane") && snake.contains("snakeEntryWaypoints.contains(snakeWaypointIndex)")
+            && snake.contains("findRestockTargetInWindow(activeLane,!entering,!entering)"),"check entry deficits once and nearby exhausted colors during travel, even with other held colors");
+        String shortage=section(source,"private ProjectionTarget findRestockTargetInWindow(Integer", "private boolean needsMaterial(");
+        check(shortage.contains("target.lane() != requiredLane") && shortage.contains("nearbyOnly")
+            && shortage.contains("(!onlyEmpty || held == 0)") && shortage.contains("hasUsableSupply(item, reserved)")
+            && shortage.contains("inventoryCapacity(item, reserved) <= 0"),"mid-band resupply is scoped to nearby missing colors with a source and capacity");
+        String boundary=section(source,"private boolean serviceSupplyWindowBoundary()","private boolean serviceOpeningBands()");
+        check(!boundary.contains("snakeWaypointIndex =") && boundary.contains("supplyWindowLanes.clear()"),"pair completion does not replay whole bands for deferred holes");
         String demand=section(source,"private List<List<ProjectionTarget>> upcomingTargetBands()","private Map<Item, Integer> materialCounts(");
         check(demand.contains("for (int lane : supplyWindowLanes)")&&demand.contains("!needsMaterial(target)"),"include deferred first leg, exclude completed/wrong cells");
+        check(demand.indexOf("byLane.put(active") < demand.indexOf("for (int lane : supplyWindowLanes)"),"current return leg leads its pair's ordering");
         System.out.println("RoundTripSupply: paired quotas, return-color reservation, partial/full inventory, last band, deferred supply and worker wiring passed.");
     }
     private static List<String> repeat(String item,int count){return Collections.nCopies(count,item);}

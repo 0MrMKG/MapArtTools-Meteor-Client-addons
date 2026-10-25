@@ -77,7 +77,7 @@ public final class FullAutoRepairSourceTest {
             && repair.indexOf("reviewSupplyTried.add(missingMaterial") > repair.indexOf("beginRestock(missingMaterial)"),
             "only a rejected no-op supply trip may consume the nearby color budget without selecting a supply item");
 
-        String supply = compact(section(module, "private boolean selectNextSupply(Item preferred)", "private double supplyVisitScore("));
+        String supply = compact(section(module, "private boolean selectNextSupply(Item preferred)", "private Map<Item, Integer> countNextLaneMaterials("));
         check(supply.contains("if(reviewRestocking&&reviewSupplyTried.contains(item))continue;"),
             "a review supply trip must not reselect an already attempted color after its normal cooldown expires");
         int selected = supply.indexOf("if(selected==null)returnfalse;");

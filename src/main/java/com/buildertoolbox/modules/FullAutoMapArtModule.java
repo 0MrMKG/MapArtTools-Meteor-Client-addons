@@ -20,6 +20,9 @@ import com.buildertoolbox.fullauto.BatchPainting;
 import com.buildertoolbox.fullauto.BatchFiles;
 import com.buildertoolbox.fullauto.BatchPrintCheckpoint;
 import com.buildertoolbox.fullauto.BatchInspection;
+import com.buildertoolbox.fullauto.OpeningBandSupply;
+import com.buildertoolbox.fullauto.WalkingProgress;
+import com.buildertoolbox.fullauto.SupplyTrip;
 import com.buildertoolbox.fullauto.StorageBlockUtils;
 import fi.dy.masa.litematica.data.DataManager;
 import java.nio.file.Path;
@@ -110,7 +113,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private static final long EMPTY_SUPPLY_RECHECK_TICKS = 20L * 60L;
     private static final long PLACEMENT_CONFIRM_TICKS = 20L;
     private static final int RESTOCK_MAX_LOOKAHEAD_LANES = 2;
-    private static final int MAX_PENDING_PLACEMENTS = 1;
+    private static final int MAX_PENDING_PLACEMENTS = 3;
     private static final int WORK_REGION_SIZE = 8;
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
         Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
@@ -185,15 +188,17 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         .name("Auto Band Width")
         .description("Use the widest band safely reachable from its middle, including the row just walked past.")
         .defaultValue(true)
+        .onChanged(value -> queueWorkPlanUpdate())
         .build()
     );
 
     private final Setting<Integer> laneWidth = sgGeneral.add(new IntSetting.Builder()
         .name("Scan Band Width")
         .description("Manual band width when Auto Band Width is off; still limited by safe reach.")
-        .defaultValue(4)
+        .defaultValue(5)
         .range(1, 16)
         .sliderRange(1, 8)
+        .onChanged(value -> queueWorkPlanUpdate())
         .build()
     );
 
@@ -211,6 +216,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         .defaultValue(3.6)
         .range(2.0, 3.6)
         .sliderRange(2.0, 3.6)
+        .onChanged(value -> queueWorkPlanUpdate())
         .build()
     );
 
@@ -294,7 +300,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final List<Integer> snakeWaypointLanes = new ArrayList<>();
     private final Set<Integer> snakeEntryWaypoints = new HashSet<>();
     private final Set<BlockPos> rejectedSupplyStands = new HashSet<>();
-    private final Set<BlockPos> triedSupplyChests = new HashSet<>();
+    private final SupplyTrip<Item, BlockPos> supplyTrip = new SupplyTrip<>();
 
     private final FullAutoPlacementEngine printer = new FullAutoPlacementEngine();
     private TaskState state = TaskState.IDLE;
@@ -320,6 +326,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private BlockPos restockReturnPos;
     private boolean returningFromRestock;
     private int supplyCheckedLane = -1;
+    private long nextLocalSupplyCheckTick;
     private int pathIndex;
     private int pathAttempts;
     private int restockInventoryBefore;
@@ -332,6 +339,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private long supplyProgressTick;
     private double supplyBestDistance = Double.POSITIVE_INFINITY;
     private int supplyOpenSyncId = -1;
+    private volatile int supplyInventorySyncId = -1;
+    private long supplyInventoryReadyTick = -1;
     private net.minecraft.screen.ScreenHandler ownedSupplyHandler;
     private int snakeWaypointIndex;
     private boolean snakeSweepCompleted;
@@ -372,13 +381,18 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final Map<Integer, Set<Item>> bandSupplyAttempts = new HashMap<>();
     // A fixed outward/return pair, not a sliding window that keeps chasing distant stock.
     private final List<Integer> supplyWindowLanes = new ArrayList<>();
+    private final OpeningBandSupply openingBands = new OpeningBandSupply();
+    private BlockPos boundaryEntryStand;
     private int observationCursor;
     private int finishingLane = -1;
+    private BlockPos bandFinishOrigin;
     private BatchPrintCheckpoint resumeCheckpoint;
     private final List<BlockPos> resumeSurveyRoute = new ArrayList<>();
     private int resumeSurveyIndex;
     private BlockPos navigationNudge, unloadedTravelGoal, unloadedTravelProxy;
     private long nudgeUntil;
+    private long navigationReleaseUntil;
+    private final WalkingProgress walkingProgress = new WalkingProgress();
     private long lastMovementReleaseTick = -100;
     private double lastPathDistance = Double.POSITIVE_INFINITY;
     private boolean updatingSupplyList;
@@ -643,6 +657,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             return;
         }
         tick++;
+        walkingProgress.sample(tick,mc.player.getX(),mc.player.getZ(),ownsForwardKey);
         if (batch.printing() && resumeCheckpoint == null) refreshProjectionObservations(256);
         if (ownedSupplyHandler != null && mc.player.currentScreenHandler != ownedSupplyHandler) {
             ownedSupplyHandler = null; supplyOpenTick = supplyAimTick = -1;
@@ -882,7 +897,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         minimumTakeCapacity.remove(item);
         capacityRecheckAt.remove(item);
         emptySupplyChestUntil.remove(container);
-        triedSupplyChests.remove(container);
+        supplyTrip.forget(container);
         updateSupplyList();
         info("Supply chest registered: %s -> %s", item.getName().getString(), container.toShortString());
     }
@@ -1002,7 +1017,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         emptySupplyChestUntil.clear();
         minimumTakeCapacity.clear();
         capacityRecheckAt.clear();
-        triedSupplyChests.clear();
+        supplyTrip.clear();
         for (String entry : entries) {
             String[] parts = entry.split(" -> ", 2);
             if (parts.length != 2) continue;
@@ -1084,6 +1099,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         verificationPass = 0;
         rebuildFilteredMatrix();
         progressTimer.beginDrawing(System.nanoTime(), targets.size(), completedMatrixCells());
+        clearPreciseRepair();finishingLane=-1;openingBands.reset();boundaryEntryStand=null;
         buildSnakeWaypoints();
         state = TaskState.WORK;
         activity = "施工设置已更新，继续" + (reverseSnake.get() ? "反向" : "正向") + "蛇形铺设";
@@ -1129,10 +1145,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             activity = "等待刚放置的方块确认";
             return;
         }
+        if (serviceNavigationRecovery()) return;
         if (returningFromRestock) {
             tickReturnFromRestock();
             return;
         }
+        if (serviceOpeningBands()) return;
         if (finishingLane >= 0) {
             int lane = finishingLane;
             if (!finishSnakeBand(lane)) skipSnakeLane(lane);
@@ -1143,6 +1161,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void buildSnakeWaypoints() {
         supplyWindowLanes.clear();
+        boundaryEntryStand=null;
         snakeWaypoints.clear();
         snakeWaypointLanes.clear();
         snakeEntryWaypoints.clear();
@@ -1183,8 +1202,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 break;
             }
         }
-        info("%s蛇形工作线：从%s端开始，单程扫描 %d 个路点。",
-            reverseSnake.get() ? "反向" : "正向", reverseSnake.get() ? "正常路线终点" : "正常路线起点", snakeWaypoints.size());
+        info("%s蛇形工作线：从%s端开始，实际带宽 %d 格（%s），单程扫描 %d 个路点。",
+            reverseSnake.get() ? "反向" : "正向", reverseSnake.get() ? "正常路线终点" : "正常路线起点",
+            workingBandWidth,autoBandWidth.get()?"自动最大安全宽度":"手动宽度",snakeWaypoints.size());
+        openingBands.start(snakeWaypointLanes);
     }
 
     private boolean holdForPlacementConfirmation() {
@@ -1239,8 +1260,22 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             activity = "当前扫描带已核对，转向下一带";
             return;
         }
-        // Keep working while either leg of this pair has useful inventory.
-        // A shortage of one color is not a reason to return to storage yet.
+        // Prepare each entry once. During a sweep, replenish a missing nearby
+        // color before leaving its cells behind, even if other colors remain.
+        if (activeLane != null && activeLane >= 0 && dispatchedPlacements.isEmpty()) {
+            boolean entering = supplyCheckedLane != activeLane && snakeEntryWaypoints.contains(snakeWaypointIndex);
+            if (entering || tick >= nextLocalSupplyCheckTick) {
+                if (entering) supplyCheckedLane = activeLane;
+                nextLocalSupplyCheckTick = tick + 5;
+                ProjectionTarget shortage = findRestockTargetInWindow(activeLane,!entering,!entering);
+                if (shortage != null) {
+                    nextLocalSupplyCheckTick = tick + 40;
+                    beginRestock(shortage);
+                    if (state != TaskState.WORK || returningFromRestock) return;
+                }
+            }
+        }
+        // If the whole pair is out, try any obtainable color in the pair.
         if (activeLane != null && activeLane >= 0 && dispatchedPlacements.isEmpty()
             && findStockedWindowTarget() == null) {
             ProjectionTarget missing = findRestockTargetInWindow();
@@ -1277,6 +1312,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             return;
         }
         BlockPos waypoint = snakeWaypoints.get(snakeWaypointIndex);
+        // Like Once, keep one continuous centerline goal per band. Nearby cells
+        // are placed above; do not interrupt travel with periodic repair stops.
         NavigationResult result = navigateTo(waypoint);
         if (result == NavigationResult.ARRIVED || result == NavigationResult.UNREACHABLE) {
             if (activeLane != null && finishSnakeBand(activeLane)) return;
@@ -1305,11 +1342,29 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             }
         }
         if (holdForPlacementConfirmation()) return;
-        NavigationResult result = navigateTo(snakeWaypoints.get(snakeWaypointIndex));
+        int lane = snakeWaypointLanes.get(snakeWaypointIndex);
+        BlockPos entry = snakeWaypoints.get(snakeWaypointIndex);
+        NavigationResult result = navigateTo(boundaryEntryStand == null ? entry : boundaryEntryStand);
+        if (result == NavigationResult.ARRIVED && boundaryEntryStand == null && !hasReachedPathStep(entry)) {
+            // Chest arrival allows 0.6 blocks, but starting a five-row sweep
+            // that far off its centerline can leave an outside row untouched.
+            if (!walkingProgress.stalled(12) && canWalkDirectlyTo(entry)) {
+                faceToward(entry);pressForward();activity="对齐条带中线后开始铺设";return;
+            }
+            result = NavigationResult.UNREACHABLE;
+        }
         if (result == NavigationResult.ARRIVED) {
+            boundaryEntryStand=null;
             snakeWaypointIndex++;
             resetNavigation();
         } else if (result == NavigationResult.UNREACHABLE) {
+            if (isBoundaryBand(lane) && boundaryEntryStand == null) {
+                boundaryEntryStand=findStandNear(entry,2);
+                if (boundaryEntryStand != null && !boundaryEntryStand.equals(entry)) {
+                    resetNavigation();activity="边界入口受阻，改从旁边有底板的位置进入";return;
+                }
+            }
+            boundaryEntryStand=null;
             // A bad corner must not discard an otherwise buildable whole band.
             if (finishSnakeBand(snakeWaypointLanes.get(snakeWaypointIndex))) return;
             snakeSkippedWaypoints++;
@@ -1321,6 +1376,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void skipSnakeLane(int lane) {
         resetNavigation();
+        boundaryEntryStand=null;
         do snakeWaypointIndex++;
         while (snakeWaypointIndex < snakeWaypointLanes.size() && snakeWaypointLanes.get(snakeWaypointIndex) == lane);
     }
@@ -1338,6 +1394,18 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         // Look up only coordinates near the player, not the whole blueprint.
         int radius = (int) Math.ceil(placeRange.get());
         BlockPos feet = mc.player.getBlockPos();
+        boolean bareForwardSweep = requiredLane != null && finishingLane < 0 && state == TaskState.WORK
+            && !returningFromRestock && snakeWaypointIndex < snakeWaypointLanes.size()
+            && requiredLane.equals(snakeWaypointLanes.get(snakeWaypointIndex))
+            && !snakeEntryWaypoints.contains(snakeWaypointIndex) && mc.player.isOnGround()
+            && mc.player.getY() <= walkY+0.03 && feet.getY() == walkY
+            && mc.world.getBlockState(feet).getCollisionShape(mc.world,feet).isEmpty();
+        int sweepDirection=1;
+        if (bareForwardSweep) {
+            int entry=snakeWaypointIndex;
+            while(entry>0 && snakeWaypointLanes.get(entry-1).equals(requiredLane)) entry--;
+            sweepDirection=snakeWaypoints.get(entry+1).getX()>=snakeWaypoints.get(entry).getX()?1:-1;
+        }
         for (int x = feet.getX() - radius; x <= feet.getX() + radius; x++) {
             for (int z = feet.getZ() - radius; z <= feet.getZ() + radius; z++) {
                 Integer index = targetIndices.get(new BlockPos(x, walkY, z));
@@ -1345,13 +1413,23 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 ProjectionTarget candidate = remainingTargets.get(index);
                 if (candidate == null) continue;
                 if (requiredLane != null && candidate.lane() != requiredLane) continue;
+                if (finishingLane >= 0 && !withinBandFinishArea(candidate.pos())) continue;
+                // On bare glass/floor, do not create a fresh carpet lip in the
+                // walking corridor. Side rows still fill now; center cells
+                // become eligible immediately after the player walks past.
+                if (bareForwardSweep && candidate.state().getBlock() instanceof CarpetBlock
+                    && MapArtNavigationPolicy.deferCarpetAhead(mc.player.getX(),mc.player.getZ(),mc.player.getWidth(),
+                        x,z,sweepDirection)) continue;
                 if (blockedTargets.contains(candidate.pos()) || playerIntersectsTarget(candidate)) continue;
                 if (eye.squaredDistanceTo(placementAim(candidate)) > rangeSquared) continue;
                 if (isPlacementPending(candidate.pos()) || isSatisfied(candidate)) continue;
                 Item item = candidate.state().getBlock().asItem();
                 if (!hasItem(item)) continue;
 
+                // Give the outer rows their in-range opportunity before they trail behind the player.
                 double distance = eye.squaredDistanceTo(Vec3d.ofCenter(candidate.pos()));
+                if (requiredLane != null && isBoundaryBand(requiredLane))
+                    distance -= 32.0*Math.abs(candidate.pos().getZ()-MapArtBandGeometry.centerZ(minZ,maxZ,workingBandWidth,requiredLane));
                 if (distance < bestDistance) {
                     best = candidate;
                     bestDistance = distance;
@@ -1361,10 +1439,21 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         return best;
     }
 
+    private boolean isBoundaryBand(int lane) {
+        return workingBandWidth > 0 && maxZ >= minZ
+            && (lane == 0 || lane == (maxZ - minZ) / workingBandWidth);
+    }
+
     private ProjectionTarget findRestockTargetInWindow() {
+        return findRestockTargetInWindow(null,false,false);
+    }
+
+    private ProjectionTarget findRestockTargetInWindow(Integer requiredLane, boolean onlyEmpty, boolean nearbyOnly) {
         Map<Item, Integer> laneDemand = new HashMap<>();
         Map<Item, ProjectionTarget> representative = new HashMap<>();
         for (ProjectionTarget target : new ArrayList<>(remainingTargets.values())) {
+            if (requiredLane != null && target.lane() != requiredLane) continue;
+            if (nearbyOnly && Math.abs(target.pos().getX()-mc.player.getX()) > Math.ceil(placeRange.get())+1) continue;
             if (!supplyWindowLanes.contains(target.lane()) || !needsMaterial(target) || blockedTargets.contains(target.pos())
                 || isPlacementPending(target.pos())) continue;
             if (isSatisfied(target)) continue;
@@ -1375,7 +1464,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         Map<Item, Integer> deficits = new HashMap<>();
         for (Map.Entry<Item, Integer> entry : laneDemand.entrySet()) {
             int held = countInventory(entry.getKey());
-            if (held < entry.getValue()) {
+            if (held < entry.getValue() && (!onlyEmpty || held == 0)) {
                 deficits.put(entry.getKey(), entry.getValue() - held);
             }
         }
@@ -1415,24 +1504,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         return null;
     }
 
-    /** Finish the pair's deferred shortages before advancing to a new, more distant pair. */
+    /** Advance supplies with the first-pass snake; retain distant holes for the final sparse repair. */
     private boolean serviceSupplyWindowBoundary() {
         Integer active = snakeWaypointIndex < snakeWaypointLanes.size() ? snakeWaypointLanes.get(snakeWaypointIndex) : null;
         if (!supplyWindowLanes.isEmpty() && !supplyWindowLanes.contains(active)) {
             if (holdForPlacementConfirmation()) return true;
-            ProjectionTarget stocked = findStockedWindowTarget();
-            ProjectionTarget shortage = stocked == null ? findRestockTargetInWindow() : null;
-            ProjectionTarget restart = stocked != null ? stocked : shortage;
-            if (restart != null) {
-                for (int index = 0; index < snakeWaypointLanes.size(); index++) {
-                    if (snakeWaypointLanes.get(index) != restart.lane()) continue;
-                    snakeWaypointIndex = index;
-                    resetNavigation();
-                    if (shortage != null) beginRestock(shortage);
-                    else activity = "往返条带仍有可铺缺口，先补齐再进入下一对条带";
-                    return true;
-                }
-            }
+            if (supplyWindowLanes.stream().anyMatch(openingBands::contains)) rememberOpeningCapacityShortage();
             supplyWindowLanes.clear();
         }
         if (supplyWindowLanes.isEmpty()) {
@@ -1444,6 +1521,80 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             }
         }
         return false;
+    }
+
+    /** Prepare the opening pair even when one of its colors is already held. */
+    private boolean serviceOpeningBands() {
+        if (openingBands.lanes().isEmpty()) return false;
+        if (openingBands.preparationPending()) {
+            supplyWindowLanes.clear();
+            supplyWindowLanes.addAll(openingBands.lanes());
+            openingBands.prepared();
+            supplyCheckedLane = openingBands.lanes().getFirst();
+            Map<Item, Integer> demand = countNextLaneMaterials();
+            int required = demand.values().stream().mapToInt(Integer::intValue).sum();
+            int held = demand.entrySet().stream().mapToInt(entry -> Math.min(entry.getValue(),countInventory(entry.getKey()))).sum();
+            info("开工前两带（%s，条带 %s）：剩余 %d 格，背包覆盖 %d 格，地毯可用空槽 %d；先备料再进入起点。",
+                reverseSnake.get() ? "反向" : "正向",openingBands.lanes().stream().map(lane -> lane+1).toList(),required,held,emptyInventorySlots());
+            ProjectionTarget shortage = findRestockTargetInWindow();
+            if (shortage != null) {
+                beginRestock(shortage);
+                if (state == TaskState.RESTOCK || returningFromRestock) return true;
+                // A constrained no-op must still allow the held opening colors to be consumed.
+                state = TaskState.WORK;
+            }
+            rememberOpeningCapacityShortage();
+            return false;
+        }
+        if (!openingBands.capacityDeferred() || tick % 5 != 0) return false;
+        Integer active = snakeWaypointIndex < snakeWaypointLanes.size() ? snakeWaypointLanes.get(snakeWaypointIndex) : null;
+        if (active != null && openingBands.contains(active)) return false;
+
+        // Inspect the opening demand without replacing the current outward/return pair yet.
+        List<Integer> currentWindow = List.copyOf(supplyWindowLanes);
+        supplyWindowLanes.clear();supplyWindowLanes.addAll(openingBands.lanes());
+        deferredBandRepairs.removeIf(pos -> {
+            Integer index = targetIndices.get(pos);
+            if (index == null) return false;
+            ProjectionTarget target = targets.get(index);
+            return openingBands.contains(target.lane()) && hasItem(target.state().getBlock().asItem())
+                && repairVisits.getOrDefault(pos,0) < 3;
+        });
+        ProjectionTarget stocked = findStockedWindowTarget();
+        boolean retry = openingBands.shouldRevisit(emptyInventorySlots(),stocked != null);
+        ProjectionTarget shortage = retry && stocked == null ? findRestockTargetInWindow() : null;
+        ProjectionTarget restart = stocked != null ? stocked : shortage;
+        if (retry && restart != null) {
+            for (int index=0;index<snakeWaypointLanes.size();index++) {
+                if (snakeWaypointLanes.get(index) != restart.lane()) continue;
+                clearPreciseRepair();finishingLane=-1;boundaryEntryStand=null;
+                snakeWaypointIndex=index;resetNavigation();
+                openingBands.resolved();
+                info("开工两带曾因容量不足缺料，现已可补：优先返回条带 %d，补齐后继续蛇形。",restart.lane()+1);
+                if (shortage != null) {
+                    beginRestock(shortage);
+                    if (state == TaskState.RESTOCK) restockReturnPos=snakeWaypoints.get(index);
+                    else state=TaskState.WORK;
+                }
+                return true;
+            }
+        }
+        supplyWindowLanes.clear();supplyWindowLanes.addAll(currentWindow);
+        return false;
+    }
+
+    private void rememberOpeningCapacityShortage() {
+        for (ProjectionTarget target : new ArrayList<>(remainingTargets.values())) {
+            Item item = target.state().getBlock().asItem();
+            if (!openingBands.contains(target.lane()) || blockedTargets.contains(target.pos())
+                || hasItem(item) || !needsMaterial(target) || supplies.getOrDefault(item,List.of()).isEmpty()) continue;
+            if (inventoryCapacity(item,0) < minimumTakeCapacity.getOrDefault(item,1)) {
+                if (!openingBands.capacityDeferred())
+                    warning("开工两带仍缺 %s，但背包容量不足（地图/玻璃板保留两槽）；先消耗现有材料，腾出空间后优先回补。",item.getName().getString());
+                openingBands.deferForCapacity(emptyInventorySlots());
+                return;
+            }
+        }
     }
 
     private boolean hasRemainingWorkInLane(int lane) {
@@ -1470,16 +1621,26 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
     }
 
-    /** Close holes while still on this band, before allowing the main snake cursor to advance. */
+    /** Finish the nearby endpoint only; do not walk back across each band before the final review. */
     private boolean finishSnakeBand(int lane) {
+        if (finishingLane != lane || bandFinishOrigin == null) bandFinishOrigin=mc.player.getBlockPos().toImmutable();
         finishingLane = lane;
-        if (batchPlacementPending()) { releaseMovement(); return true; }
         if (preciseRepairTarget != null) {
+            if (batchPlacementPending()) { releaseMovement(); return true; }
             ProjectionTarget target = preciseRepairTarget;
             if (tickPreciseRepair(target)) return true;
             if (!isSatisfied(target)) deferredBandRepairs.add(target.pos());
             clearPreciseRepair();
         }
+        // Fill all reachable cells from this stand before paying for another
+        // precise repair route. Rotation callbacks remain serialized by tickWork.
+        ProjectionTarget nearby = selectReachableMatrixTarget(lane);
+        if (nearby != null) {
+            if (tick >= nextActionTick) placeTarget(nearby);
+            else releaseMovement();
+            return true;
+        }
+        if (batchPlacementPending()) { releaseMovement(); return true; }
         ProjectionTarget best = null;
         double distance = Double.POSITIVE_INFINITY;
         int missing = 0;
@@ -1489,6 +1650,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             BlockState actual = loaded ? batch.observedBlock(target.pos()) : null;
             if (loaded && !actual.isAir() && !actual.isReplaceable()) continue;
             missing++;
+            if (!withinBandFinishArea(target.pos())) continue;
             if (deferredBandRepairs.contains(target.pos())) continue;
             // Consume other stocked colors before requesting a missing color.
             double candidate = distanceToPlayer(target.pos())
@@ -1496,7 +1658,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             if (candidate < distance) { best = target; distance = candidate; }
         }
         if (best == null) {
-            if (missing > 0) warning("本带仍有 %d 格未确认，已保留为缺口；后续宽范围检查会定点重试。", missing);
+            if (missing > 0) activity="本带保留 "+missing+" 个缺口，首遍结束后集中定点修补";
             finishingLane = -1;
             return false;
         }
@@ -1522,6 +1684,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (!tickPreciseRepair(best)) deferredBandRepairs.add(best.pos());
         activity = "条带收尾：核对并补齐漏格 " + best.pos().toShortString();
         return true;
+    }
+
+    private boolean withinBandFinishArea(BlockPos pos) {
+        return bandFinishOrigin != null
+            && Math.abs(pos.getX()-bandFinishOrigin.getX()) <= placeRange.get()
+            && Math.abs(pos.getZ()-bandFinishOrigin.getZ()) <= placeRange.get();
     }
 
     private void clearPreciseRepair() {
@@ -1753,6 +1921,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         state = TaskState.WORK;
         BlockPos returnPos = mc.player.getBlockPos().toImmutable();
         resetNavigation();
+        supplyTrip.clear();
         if (!selectNextSupply(current.state().getBlock().asItem())) {
             if (findStockedTarget() != null) {
                 finishRestock();
@@ -1868,14 +2037,18 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private boolean selectNextSupply(Item preferred) {
         List<List<ProjectionTarget>> bands = upcomingTargetBands();
         if (bands.isEmpty()) return false;
-        Map<Item, Integer> urgent = countNextLaneMaterials();
         List<List<Item>> materialBands = new ArrayList<>();
         Map<Item, MapArtSupplyPlanner.Stock> inventory = new HashMap<>();
+        Map<Item, Integer> admitted = new HashMap<>();
         int empty = emptyInventorySlots();
         for (List<ProjectionTarget> band : bands) {
             List<Item> materials = new ArrayList<>();
             for (ProjectionTarget target : band) {
                 Item item = target.state().getBlock().asItem();
+                // Remaining world demand may shrink, but this trip's quota
+                // must not expand after taking another color or stack.
+                if (admitted.getOrDefault(item,0) >= supplyTrip.limit(item,Integer.MAX_VALUE)) continue;
+                admitted.merge(item,1,Integer::sum);
                 materials.add(item);
                 inventory.computeIfAbsent(item, key -> new MapArtSupplyPlanner.Stock(
                     countInventory(key), countInventory(key) + inventoryCapacity(key, empty),
@@ -1885,9 +2058,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             materialBands.add(materials);
         }
         MapArtSupplyPlanner.Plan<Item> plan = MapArtSupplyPlanner.planRoundTrip(materialBands, inventory, empty);
-        Item selected = null;
-        double selectedScore = Double.NEGATIVE_INFINITY;
-        int selectedPriority = Integer.MAX_VALUE;
+        supplyTrip.freezeGoals(plan.desired());
+        List<SupplyTrip.Source<Item,BlockPos>> sources = new ArrayList<>();
         for (Map.Entry<Item, Integer> entry : plan.desired().entrySet()) {
             Item item = entry.getKey();
             if (reviewRestocking && reviewSupplyTried.contains(item)) continue;
@@ -1896,16 +2068,14 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             int reserved = plan.reservedForOthers(item);
             if (deficit <= 0 || !hasUsableSupply(item, reserved)) continue;
             if (inventoryCapacity(item, reserved) <= 0) continue;
-            int priority = urgent.getOrDefault(item, 0) > held ? 0 : 1;
-            double score = supplyVisitScore(item, deficit);
-            if (selected == null || priority < selectedPriority
-                || (priority == selectedPriority && (item == preferred
-                    || (selected != preferred && score > selectedScore)))) {
-                selected = item;
-                selectedPriority = priority;
-                selectedScore = score;
-            }
+            for (BlockPos chest : supplies.getOrDefault(item,List.of()))
+                if (!isSupplyChestUnavailable(chest))
+                    sources.add(new SupplyTrip.Source<>(item,chest,distanceToPlayer(chest)));
         }
+        // Distance is the primary ordering across ALL needed colors, not a
+        // tie-breaker after preferred-color/empty-inventory priority.
+        SupplyTrip.Source<Item,BlockPos> nearest = supplyTrip.nearest(sources);
+        Item selected = nearest == null ? null : nearest.item();
         if (selected == null) return false;
         if (reviewRestocking) reviewSupplyTried.add(selected);
         supplyItem = selected;
@@ -1913,21 +2083,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyReceivedThisRound = 0;
         int capacity = inventoryCapacity(selected, reservedSupplySlots);
         supplyAmount = Math.min(capacity, Math.max(0, plan.desired().get(selected) - countInventory(selected)));
-        info("往返备料 %s：两带剩余需要 %d，背包已有 %d，计划补入 %d（整组取货）。",
-            selected.getName().getString(), urgent.getOrDefault(selected, 0), countInventory(selected), supplyAmount);
-        triedSupplyChests.clear();
+        info("就近备料 %s：最近箱 %s，距离 %.1f 格，背包已有 %d，本趟补入 %d（整组取货）。",
+            selected.getName().getString(), nearest.position().toShortString(),Math.sqrt(nearest.distanceSquared()),countInventory(selected),supplyAmount);
         supplyChest = null;
         resetRestockTransfer();
         resetNavigation();
         return true;
-    }
-
-    private double supplyVisitScore(Item item, int demand) {
-        double distance = supplies.getOrDefault(item, List.of()).stream()
-            .filter(pos -> !isSupplyChestUnavailable(pos))
-            .mapToDouble(pos -> Math.sqrt(distanceToPlayer(pos)))
-            .min().orElse(Double.POSITIVE_INFINITY);
-        return -distance + Math.min(demand, 64) * 0.01;
     }
 
     private Map<Item, Integer> countNextLaneMaterials() {
@@ -2046,6 +2207,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             restockReturnPos = null;
         }
         state = TaskState.WORK;
+        // A successful supply visit is not a permanent ban on that color for
+        // this review: it may be used up again while repairing other holes.
+        if (reviewRestocking) reviewSupplyTried.removeIf(this::hasItem);
         activity = returningFromRestock ? "补货结束，仅行走返回蛇形工作位置" : "补货结束，继续铺设";
     }
 
@@ -2145,6 +2309,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         boolean cleanup = reviewPass > 0 || snakeWaypointIndex >= snakeWaypointLanes.size();
         if (reviewPass == 0 && !supplyWindowLanes.isEmpty()) cleanup = false;
         if (!cleanup) {
+            // On the return leg, its remaining cells outrank deferred holes
+            // from the outward leg while both remain in the fixed pair.
+            if (snakeWaypointIndex < snakeWaypointLanes.size()) {
+                int active = snakeWaypointLanes.get(snakeWaypointIndex);
+                if (supplyWindowLanes.contains(active)) byLane.put(active,new ArrayList<>());
+            }
             for (int lane : supplyWindowLanes) byLane.put(lane, new ArrayList<>());
             if (byLane.isEmpty()) for (int index = snakeWaypointIndex; index < snakeWaypointLanes.size(); index++) {
                 int lane = snakeWaypointLanes.get(index);
@@ -2338,7 +2508,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             // Choose again after every chest: the nearest remaining chest can
             // change as the player moves, and registration order is arbitrary.
             BlockPos nearest = supplies.getOrDefault(supplyItem, List.of()).stream()
-                .filter(pos -> !triedSupplyChests.contains(pos) && !isSupplyChestUnavailable(pos))
+                .filter(pos -> !supplyTrip.visited(pos) && !isSupplyChestUnavailable(pos))
                 .min(Comparator.comparingDouble(this::distanceToPlayer))
                 .orElse(null);
             if (nearest == null) {
@@ -2363,7 +2533,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             supplyChest = nearest;
             supplyProgressTick = tick;
             supplyBestDistance = distanceToPlayer(nearest);
-            triedSupplyChests.add(nearest);
+            supplyTrip.visit(nearest);
             info("补货 %s：前往最近的未尝试箱子 %s；本轮还需 %d 个。",
                 supplyItem.getName().getString(), nearest.toShortString(), supplyAmount);
             supplyChestLabel = findNearestLabelItem(supplyChest, 4);
@@ -2388,6 +2558,15 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             releaseMovement();
             activity = "请关闭手动打开的容器，之后继续补货";
             return;
+        }
+        if (opened != null) {
+            if (supplyInventorySyncId == opened.syncId && supplyInventoryReadyTick < 0) supplyInventoryReadyTick=tick;
+            if (supplyInventorySyncId != opened.syncId || supplyInventoryReadyTick < 0 || tick-supplyInventoryReadyTick < 2) {
+                releaseMovement();
+                if (supplyOpenTick >= 0 && tick-supplyOpenTick >= 100) deferSupplyChest("完整库存列表未同步");
+                else activity="等待服务器同步箱子物品，不判定为空箱";
+                return;
+            }
         }
         if (opened == null && mc.currentScreen != null && !(mc.currentScreen instanceof GameMenuScreen)) {
             if (mc.currentScreen instanceof Generic3x3ContainerScreen) mc.player.closeHandledScreen();
@@ -2442,6 +2621,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             }
             faceToward(chestHit.getPos());
             supplyOpenSyncId = mc.player.currentScreenHandler.syncId;
+            supplyInventorySyncId=-1;supplyInventoryReadyTick=-1;
             BlockUtils.interact(chestHit, Hand.MAIN_HAND, true);
             supplyOpenAttempts++;
             supplyOpenTick = tick;
@@ -2721,6 +2901,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private NavigationResult navigateLoaded(BlockPos goal) {
+        if (tick < navigationReleaseUntil && goal.equals(navigationGoal)) {
+            releaseMovement();activity="地毯卡位：松开前进后重新站稳";
+            return NavigationResult.MOVING;
+        }
         if (navigationNudge != null) {
             if (goal.equals(navigationGoal) && tick < nudgeUntil && !hasReachedPathStep(navigationNudge)
                 && canWalkDirectlyTo(navigationNudge)) {
@@ -2733,14 +2917,17 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             navigationGoal = null;
             return NavigationResult.ARRIVED;
         }
-        if (!isStandUsable(goal)) return NavigationResult.UNREACHABLE;
+        if (!isStandUsable(goal)) { releaseMovement(); return NavigationResult.UNREACHABLE; }
         boolean differentGoal = navigationGoal == null || !navigationGoal.equals(goal);
         BlockPos pendingStep = pathIndex < path.size() ? path.get(pathIndex) : null;
         boolean carpetTransition = pendingStep != null
             && (mc.world.getBlockState(pendingStep).getBlock() instanceof CarpetBlock
                 || mc.world.getBlockState(mc.player.getBlockPos()).getBlock() instanceof CarpetBlock);
         int timeout = carpetTransition ? Math.min(stuckTimeout.get(), 40) : stuckTimeout.get();
-        boolean stuck = !path.isEmpty() && tick - lastProgressTick >= timeout;
+        // Placement confirmations update lastProgressTick too. Independently
+        // count real walking so those updates cannot conceal a blocked carpet lip.
+        boolean stuck = !path.isEmpty() && (tick - lastProgressTick >= timeout
+            || walkingProgress.stalled(carpetTransition ? 12 : 20));
         if (differentGoal || path.isEmpty() || stuck) {
             if (differentGoal) {
                 resetNavigation();
@@ -2750,6 +2937,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 // Avoid this exact step on the next BFS instead of planning
                 // the same blocked edge forever.
                 releaseMovement();
+                walkingProgress.reset();
+                navigationReleaseUntil = tick + 3;
+                pathAttempts++;
+                if (pathAttempts > routeRetries.get()) return NavigationResult.UNREACHABLE;
                 if (pendingStep != null) {
                     // A smoothed supply waypoint may be far away. Avoid the
                     // immediate blocked step, not the chest/return endpoint.
@@ -2768,13 +2959,17 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 for (int offset = 0; offset < HORIZONTAL_DIRECTIONS.length; offset++) {
                     BlockPos candidate = feet.offset(HORIZONTAL_DIRECTIONS[(pathAttempts + offset) % HORIZONTAL_DIRECTIONS.length]);
                     if (!candidate.equals(pendingStep) && isStandUsable(candidate) && canWalkDirectlyTo(candidate)) {
-                        navigationNudge = candidate; nudgeUntil = tick + 12; path.clear(); return NavigationResult.MOVING;
+                        navigationNudge = candidate; nudgeUntil = navigationReleaseUntil + 12;
+                        path.clear();pathIndex=0;return NavigationResult.MOVING;
                     }
                 }
+                // Even without an escape cell, perform the full key release
+                // before retrying. Do not press forward again in this tick.
+                path.clear();pathIndex=0;return NavigationResult.MOVING;
             }
-            if (pathAttempts > routeRetries.get()) return NavigationResult.UNREACHABLE;
+            if (pathAttempts > routeRetries.get()) { releaseMovement(); return NavigationResult.UNREACHABLE; }
             pathAttempts++;
-            if (!planPath(goal)) return NavigationResult.UNREACHABLE;
+            if (!planPath(goal)) { releaseMovement(); return NavigationResult.UNREACHABLE; }
         }
         while (pathIndex < path.size() && hasReachedPathStep(path.get(pathIndex))) {
             pathIndex++;
@@ -2996,6 +3191,19 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         pathAttempts = 0;
         lastPathDistance = Double.POSITIVE_INFINITY;
         navigationNudge = null;
+        navigationReleaseUntil = 0;
+        walkingProgress.reset();
+    }
+
+    /** A chosen escape must finish before nearby placement can steal its movement. */
+    private boolean serviceNavigationRecovery() {
+        if (navigationGoal == null || (navigationNudge == null && tick >= navigationReleaseUntil)) return false;
+        if (batchPlacementPending()) { releaseMovement(); return true; }
+        NavigationResult result = navigateTo(navigationGoal);
+        if (result != NavigationResult.MOVING) {
+            navigationNudge=null;navigationReleaseUntil=0;releaseMovement();
+        }
+        return true;
     }
 
     private void pressForward() {
@@ -3031,10 +3239,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void resetRuntime() {
-        clearPreciseRepair();repairVisits.clear();deferredBandRepairs.clear();bandSupplyAttempts.clear();supplyWindowLanes.clear();
+        clearPreciseRepair();repairVisits.clear();deferredBandRepairs.clear();bandSupplyAttempts.clear();supplyWindowLanes.clear();openingBands.reset();boundaryEntryStand=null;
         observationCursor = 0;finishingLane = -1;resumeCheckpoint = null;resumeSurveyRoute.clear();resumeSurveyIndex = 0;
         navigationNudge = unloadedTravelGoal = unloadedTravelProxy = null;
         ownedSupplyHandler = null;
+        supplyInventorySyncId=-1;supplyInventoryReadyTick=-1;
         cursorSpaceAttempts = 0; cursorSpaceCount = -1; cursorSpaceItem = null;
         cursorSpaceTarget = null; cursorSpaceStand = cursorSpaceOrigin = null;
         cursorSpaceReturning = false; cursorSpacePlanAt = 0; cursorSpaceRejected.clear(); cursorSpaceRejectedStands.clear();
@@ -3046,6 +3255,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         restockReturnPos = null;
         returningFromRestock = false;
         supplyCheckedLane = -1;
+        nextLocalSupplyCheckTick = 0;
         targets.clear();
         projectionLayer.clear();
         workPlanDirty = false;
@@ -3060,7 +3270,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         emptySupplyChestUntil.clear();
         minimumTakeCapacity.clear();
         capacityRecheckAt.clear();
-        triedSupplyChests.clear();
+        supplyTrip.clear();
         resetNavigation();
         targetIndex = 0;
         verificationIndex = 0;
@@ -3238,6 +3448,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     @EventHandler
     private void onBatchPacket(PacketEvent.Receive event) {
+        if (event.packet instanceof net.minecraft.network.packet.s2c.play.InventoryS2CPacket inventory
+            && inventory.syncId() > 0) supplyInventorySyncId=inventory.syncId();
         batch.receive(event.packet);
     }
 
@@ -3401,7 +3613,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         reviewSupplyTried.clear();
         blockedTargets.clear();
         reviewAttempted.clear();
-        clearPreciseRepair();repairVisits.clear();deferredBandRepairs.clear();bandSupplyAttempts.clear();supplyWindowLanes.clear();finishingLane=-1;
+        clearPreciseRepair();repairVisits.clear();deferredBandRepairs.clear();bandSupplyAttempts.clear();supplyWindowLanes.clear();finishingLane=-1;boundaryEntryStand=null;
         placementStandTarget = footingRecoveryGoal = null;
         placementStandSince = -1;
         // Do not turn unloaded, already-built strips into false material
@@ -3437,6 +3649,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             releaseMovement();
             return true;
         }
+        if (serviceNavigationRecovery()) return true;
         if (footingRecoveryGoal != null) {
             NavigationResult result = navigateTo(footingRecoveryGoal);
             if (result != NavigationResult.MOVING) { footingRecoveryGoal = null; resetNavigation(); }
@@ -3475,8 +3688,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 if (distance < nearest) { nearest = distance; best = candidate; }
             }
         }
-        if (best == null) {
-            if (missingMaterial == null) return false;
+        if (missingMaterial != null) {
             reviewRestocking = true;
             beginRestock(missingMaterial);
             // A reserved-slot/full-stack constraint can reject a trip before
@@ -3485,6 +3697,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             if (state != TaskState.RESTOCK) reviewSupplyTried.add(missingMaterial.state().getBlock().asItem());
             return true;
         }
+        if (best == null) return false;
         reviewingRepair = true;
         try { placeTarget(best); }
         finally { reviewingRepair = false; }

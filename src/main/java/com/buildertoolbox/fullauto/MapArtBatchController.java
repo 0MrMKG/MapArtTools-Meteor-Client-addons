@@ -470,15 +470,22 @@ public final class MapArtBatchController {
         captureDrawing();
         host.batchStopWorker();
         job.repairPass=1;
+        inspection=null;
         beginRepairPass();
     }
 
     private void beginRepairPass() throws IOException {
         host.batchBeginReviewRepairs(job.repairPass);
-        inspection=null;inspectionWaypoint=0;inspectionResume=null;job.inspection=null;
-        inspectionRepairTarget=null;inspectionDeferred.clear();canvasScanIndex=0;completedScanRevision=-1;
+        // Keep the first coverage map. Failed/missing cells get another targeted
+        // attempt, not a newly blank matrix and another complete physical lap.
+        if(inspection==null) {
+            inspectionWaypoint=0;job.inspection=null;canvasScanIndex=0;completedScanRevision=-1;
+        } else if(inspection.unknown()>0) inspectionWaypoint=0;
+        inspectionResume=null;inspectionRepairTarget=null;inspectionDeferred.clear();
         transition(Phase.REVIEW);
-        host.batchMessage("开始第 "+(job.repairPass+1L)+" 轮宽范围补检：分帧读取整个已加载画布，32格扫描带，仅接近缺口；允许漏放 ≤ "+host.batchAllowedMissingBlocks());
+        host.batchMessage(inspection==null
+            ? "开始一次全图检查并补漏：分帧读取画布，仅接近缺口；允许漏放 ≤ "+host.batchAllowedMissingBlocks()
+            : "保留已检查区域，继续定点补剩余漏格 "+inspection.missing()+"；不重新遍历整张画布");
     }
 
     private void inspectDrawing() throws IOException {
@@ -491,7 +498,7 @@ public final class MapArtBatchController {
         observeNearby();
         if(host.batchRepairNearby()) {
             access.release(tick);
-            report("第 "+(job.repairPass+1L)+" 轮蛇形修补：已检查 "+inspection.observed()+"/16384，漏放 "+inspection.missing()+"（允许 ≤ "+host.batchAllowedMissingBlocks()+"），错占 "+inspection.wrong()+"（不计门槛）");
+            report("检查并补漏：已检查 "+inspection.observed()+"/16384，漏放 "+inspection.missing()+"（允许 ≤ "+host.batchAllowedMissingBlocks()+"），错占 "+inspection.wrong()+"（不计门槛）");
             return;
         }
         errors=inspection.errors();
@@ -529,7 +536,7 @@ public final class MapArtBatchController {
                 return;
             }
             if(route==1){inspectionWaypoint++;save();}
-            report("第 "+(job.repairPass+1L)+" 轮修补 "+inspectionWaypoint+"/"+inspection.route().size()+"，已检查 "+inspection.observed()+"/16384，漏放 "+inspection.missing()+"（允许 ≤ "+host.batchAllowedMissingBlocks()+"），错占 "+inspection.wrong()+"（不计门槛）");
+            report("加载未检查区域 "+inspectionWaypoint+"/"+inspection.route().size()+"，已检查 "+inspection.observed()+"/16384，漏放 "+inspection.missing()+"（允许 ≤ "+host.batchAllowedMissingBlocks()+"）");
             return;
         }
         if(host.batchPlacementPending()){access.release(tick);report("等待本轮最后的放置确认");return;}
@@ -538,7 +545,7 @@ public final class MapArtBatchController {
         if(completedScanRevision!=canvasRevision.get()){access.release(tick);report("正在确认最后一次放置后的实际画布");return;}
         access.reset();errors=inspection.errors();
         unknown=inspection.unknown();allowed=host.batchAllowedMissingBlocks();
-        host.batchMessage("第 "+(job.repairPass+1L)+" 轮修补结束：漏放 "+inspection.missing()+"（允许 ≤ "+allowed+"），错占 "+inspection.wrong()+"（仅标记，不计门槛），未读取 "+unknown);
+        host.batchMessage("本批定点补漏结束：漏放 "+inspection.missing()+"（允许 ≤ "+allowed+"），错占 "+inspection.wrong()+"（仅标记，不计门槛），未读取 "+unknown);
         if(BatchWorkflowRules.reviewAction(job.repairPass,inspection.missing(),unknown,allowed)==BatchWorkflowRules.ReviewAction.ACCEPT)
             drawingAccepted(allowed);
         else {job.repairPass=BatchWorkflowRules.nextRepairPass(job.repairPass);beginRepairPass();}
