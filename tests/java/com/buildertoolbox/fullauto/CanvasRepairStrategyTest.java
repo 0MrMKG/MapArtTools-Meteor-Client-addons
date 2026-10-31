@@ -1,9 +1,6 @@
 package com.buildertoolbox.fullauto;
 
-import java.util.List;
-import java.util.Set;
-
-/** Real matrix decisions: loaded-area scanning, defect detours and distrust of saved cursors. */
+/** Real matrix decisions: loaded-area scanning, defect detours and fresh server observations. */
 public final class CanvasRepairStrategyTest {
     public static void main(String[] args) {
         BatchInspection canvas = new BatchInspection(BatchInspection.SCAN_WIDTH, false);
@@ -46,15 +43,7 @@ public final class CanvasRepairStrategyTest {
             "wide scan progress round-trips through the existing journal");
         check(!BatchInspection.restartAfterOffline(saved).complete(), "offline completion observations cannot be reused");
 
-        var route = List.of(new BatchPrintCheckpoint.Step(0,2,0,true),new BatchPrintCheckpoint.Step(127,2,0,false),
-            new BatchPrintCheckpoint.Step(127,7,1,true),new BatchPrintCheckpoint.Step(0,7,1,false),
-            new BatchPrintCheckpoint.Step(0,12,2,true),new BatchPrintCheckpoint.Step(127,12,2,false));
-        var checkpoint = new BatchPrintCheckpoint(5,false,5,0,0,90,12,0,route);
-        check(checkpoint.reconciledCursor(Set.of(0,2)::contains) == 0, "a first-band hole rewinds a cursor already saved in the third band");
-        check(checkpoint.reconciledCursor(Set.of(1)::contains) == 2, "second-band holes are not lost behind the cursor");
-        check(checkpoint.reconciledCursor(lane -> false) == route.size(), "real completed bands do not need printing again");
-        check(checkpoint.reconciledCursor(lane -> true) == 0, "unknown prior bands conservatively remain work");
-        System.out.println("CanvasRepairStrategy: budgeted full-canvas perception, sparse snake loading, defect-only travel, server revision gate and resumed-band reconciliation passed.");
+        System.out.println("CanvasRepairStrategy: budgeted full-canvas perception, sparse snake loading, defect-only travel and server revision gate passed.");
     }
     private static void check(boolean value,String message) { if (!value) throw new AssertionError(message); }
 }

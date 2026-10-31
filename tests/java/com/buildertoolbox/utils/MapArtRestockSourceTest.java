@@ -27,7 +27,10 @@ public final class MapArtRestockSourceTest {
                 check(source.contains("batch.rememberCursorOrigin(opened,slot)"),
                     name + " must preserve the exact owned source for interrupted transfers");
             }
-            check(source.contains("tick - supplyProgressTick >= 20L * 30"), name + " lost its no-progress supply watchdog");
+            String timeout = name.equals("FullAutoMapArtModule")
+                ? "tick - supplyProgressTick >= StationaryRestockWatchdog.TIMEOUT_TICKS"
+                : "tick - supplyProgressTick >= 20L * 30";
+            check(source.contains(timeout), name + " lost its no-progress supply watchdog");
             check(source.contains("if (supplyOpenAttempts >= 3)"), name + " lost its bounded chest-open attempts");
             check(source.contains("supplyOpenAttempts++;"), name + " must count actual chest clicks");
             check(!source.contains("已暂停：鼠标指针仍持有物品"), name + " must not pause the job solely due to a cursor stack");
@@ -101,7 +104,7 @@ public final class MapArtRestockSourceTest {
                 && printer.contains("compatible == bestCompatible && stack.getCount() < smallest"),
                 relative + " space recovery must choose a cursor-compatible or smallest hotbar stack, not the first match");
         }
-        System.out.println("MapArtRestockSource: direct restock without compaction, whole-stack retrieval, 30s no-progress watchdog and bounded chest clicks passed.");
+        System.out.println("MapArtRestockSource: direct restock, whole-stack retrieval, module-specific no-progress watchdogs and bounded chest clicks passed.");
     }
 
     private static void check(boolean condition, String message) {

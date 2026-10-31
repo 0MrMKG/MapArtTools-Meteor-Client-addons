@@ -32,13 +32,22 @@ public record BatchPrintCheckpoint(int width, boolean reverse, int cursor, int o
         return text.append(';').append(restocking ? 1 : 0).toString();
     }
 
-    /** A saved cursor is only a hint. Actual missing/unknown bands take precedence. */
-    public int reconciledCursor(java.util.function.IntPredicate needsWork) {
+    /** Keep earlier holes for final review, with a small overlap for unconfirmed clicks at the stop. */
+    public boolean precedesResume(int lane, int x, int overlap) {
+        if (cursor == route.size()) return true;
+        int entry = -1;
         for (int i = 0; i < route.size(); i++) {
-            Step step = route.get(i);
-            if (step.entry() && needsWork.test(step.lane())) return i;
+            if (route.get(i).lane() == lane) { entry = i; break; }
         }
-        return route.size();
+        // Lanes omitted from the saved route were already passed over. They
+        // still belong to the real-world review, not to a new first sweep.
+        if (entry < 0) return true;
+        if (entry > cursor) return false;
+        Step current = route.get(cursor);
+        if (current.lane() != lane) return true;
+        if (current.entry() || entry + 1 >= route.size() || route.get(entry + 1).lane() != lane) return false;
+        int direction = Integer.compare(route.get(entry + 1).x(), route.get(entry).x());
+        return ((long) x - resumeX) * direction < -Math.max(0, overlap);
     }
 
     public static BatchPrintCheckpoint decode(String value) {

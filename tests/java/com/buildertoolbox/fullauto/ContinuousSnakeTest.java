@@ -40,8 +40,12 @@ public final class ContinuousSnakeTest {
             && work.contains("dispatchedPlacements.size() >= MAX_PENDING_PLACEMENTS"), "bounded three-receipt pipeline still serializes actual rotation callbacks");
         String snake=section(module,"private void tickSnakeWork()", "private void tickSnakeTurn()");
         check(!module.contains("boundarySweep") && !module.contains("finishingBoundarySection"), "no periodic boundary stop/repair cursor");
-        check(snake.indexOf("selectReachableMatrixTarget(activeLane)") < snake.indexOf("navigateTo(waypoint)"), "drain reachable work before walking");
-        check(snake.indexOf("holdForPlacementConfirmation()") < snake.indexOf("navigateTo(waypoint)"), "movement waits for in-flight clicks");
+        String sweepNavigation="navigateTo(sweepEndpointStand == null ? waypoint : sweepEndpointStand)";
+        check(snake.contains(sweepNavigation)
+            && snake.indexOf("selectReachableMatrixTarget(activeLane)") < snake.indexOf(sweepNavigation),
+            "drain reachable work before walking to the endpoint or safe alternate stand");
+        check(snake.indexOf("holdForPlacementConfirmation()") < snake.indexOf(sweepNavigation),
+            "movement waits for in-flight clicks");
         check(snake.indexOf("finishSnakeBand(activeLane)") > snake.indexOf("result == NavigationResult.ARRIVED"), "band reconciliation only at endpoint or failed navigation");
         String finish=section(module,"private boolean finishSnakeBand(int lane)","private void clearPreciseRepair()");
         check(finish.indexOf("selectReachableMatrixTarget(lane)") < finish.indexOf("for (ProjectionTarget target : targets)"), "endpoint fills reachable neighbors before requesting another repair stand");

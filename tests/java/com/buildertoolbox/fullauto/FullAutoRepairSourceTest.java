@@ -96,7 +96,9 @@ public final class FullAutoRepairSourceTest {
         String restock = section(module, "private void beginRestock(ProjectionTarget current)", "private WorkChoice findStockedTarget()");
         String finish = section(module, "private void finishRestock()", "private void continueRestock()");
         String returning = section(module, "private void tickReturnFromRestock()", "private void finishReturnToWork()");
-        check(restock.contains("restockReturnPos = returnPos") && finish.contains("returningFromRestock = restockReturnPos != null")
+        check(restock.contains("restockReturnPos = returnPos")
+            && finish.contains("restockReturnPos != null && !hasReached(restockReturnPos)")
+            && finish.contains("returningFromRestock = true") && finish.contains("mc.world.isChunkLoaded(")
             && returning.contains("navigateTo(restockReturnPos)") && !returning.contains("placeTarget("),
             "replenishment must return to the saved repair position without consuming planned materials in transit");
 
