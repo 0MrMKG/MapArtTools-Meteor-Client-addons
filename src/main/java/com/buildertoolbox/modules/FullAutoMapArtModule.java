@@ -228,15 +228,6 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         .build()
     );
 
-    private final Setting<Integer> placementSpeed = sgGeneral.add(new IntSetting.Builder()
-        .name("Placement Speed")
-        .description("Maximum placement attempts per second while stationary. Confirm each placement before switching materials or walking.")
-        .defaultValue(20)
-        .range(1, 20)
-        .sliderRange(1, 20)
-        .build()
-    );
-
     private final Setting<Boolean> statusMessages = sgGeneral.add(new BoolSetting.Builder()
         .name("Status Messages")
         .description("Shows a chat progress message every 10 seconds and whenever the worker stops.")
@@ -1882,7 +1873,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         FullAutoPlacementEngine.ExternalPlacementResult result = printer.placeProjectionBlock(
             target.pos(), target.state(), placeRange.get(), repairVisits.getOrDefault(target.pos(), 0)
         );
-        nextActionTick = tick + Math.max(1, (int) Math.ceil(20.0 / placementSpeed.get()));
+        nextActionTick = tick + 1;
         switch (result) {
             case COMPLETE -> {
                 if (!isSatisfied(target)) {
@@ -2470,7 +2461,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (!mc.player.isOnGround() || velocity.x*velocity.x+velocity.z*velocity.z > 0.000625 || tick < nextActionTick) return true;
         batch.watchPlacement(best.pos());
         FullAutoPlacementEngine.ExternalPlacementResult result = printer.placeProjectionBlockForCursorRecovery(best.pos(),best.state(),placeRange.get());
-        nextActionTick = tick+Math.max(1,(int)Math.ceil(20.0/placementSpeed.get()));
+        nextActionTick = tick + 1;
         if (result == FullAutoPlacementEngine.ExternalPlacementResult.DISPATCHED) {
             cursorSpaceAttempts++;
             dispatchedPlacements.put(best.pos(),tick);lastPlacementDispatchTick=tick;
