@@ -1,6 +1,7 @@
 package com.buildertoolbox.fullauto;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -13,7 +14,20 @@ public final class SupplyTrip<I, P> {
     private final Set<P> visited = new HashSet<>();
 
     public void freezeGoals(Map<I, Integer> desired) {
-        if (goals == null) goals = new LinkedHashMap<>(desired);
+        if (goals == null) goals = Collections.unmodifiableMap(new LinkedHashMap<>(desired));
+    }
+    public boolean planned() { return goals != null; }
+    public Map<I, Integer> goals() { return goals == null ? Map.of() : goals; }
+
+    /** Only the free slots still needed by the other frozen quotas are reserved. */
+    public int reservedForOthers(I selected, Map<I, MapArtSupplyPlanner.Stock> inventory) {
+        int reserved = 0;
+        for (var entry : goals().entrySet()) {
+            var stock = inventory.get(entry.getKey());
+            if (!entry.getKey().equals(selected) && stock != null)
+                reserved += MapArtSupplyPlanner.extraSlotsNeeded(entry.getValue(), stock);
+        }
+        return reserved;
     }
     public int limit(I item, int demand) {
         return goals == null ? demand : Math.min(demand, goals.getOrDefault(item, 0));

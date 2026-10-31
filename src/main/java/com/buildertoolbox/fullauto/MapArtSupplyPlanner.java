@@ -19,11 +19,34 @@ public final class MapArtSupplyPlanner {
         }
     }
 
-    /** Reserve colors across both legs before allocating extra stacks to the outward leg. */
+    /** Finish funding the active band before spending spare slots on the return band. */
     public static <T> Plan<T> planRoundTrip(List<List<T>> bands, Map<T, Stock> inventory, int emptySlots) {
-        List<T> roundTrip = new ArrayList<>();
-        for (int index = 0; index < Math.min(2, bands.size()); index++) roundTrip.addAll(bands.get(index));
-        return plan(List.of(roundTrip), inventory, emptySlots);
+        return plan(bands.subList(0, Math.min(2, bands.size())), inventory, emptySlots);
+    }
+
+    /** Add a small buffer only after real band demand fits; never start a visit just for buffer stock. */
+    public static <T> Plan<T> withBuffer(Plan<T> plan, Map<T, Stock> inventory, int emptySlots,
+                                        Map<T, Integer> totalRemaining, int buffer) {
+        if (buffer <= 0 || plan.demand().entrySet().stream()
+            .anyMatch(entry -> plan.desired().getOrDefault(entry.getKey(), 0) < entry.getValue())) return plan;
+        Map<T, Integer> desired = new LinkedHashMap<>(plan.desired());
+        Map<T, Integer> slots = new LinkedHashMap<>(plan.extraSlots());
+        int free = Math.max(0, emptySlots - slots.values().stream().mapToInt(Integer::intValue).sum());
+        for (var entry : desired.entrySet()) {
+            T item = entry.getKey();
+            Stock stock = inventory.get(item);
+            if (!stock.replenishable() || stock.deferred() || entry.getValue() <= stock.count()) continue;
+            int allocated = slots.getOrDefault(item, 0);
+            int goal = (int) Math.min((long) entry.getValue() + buffer,
+                Math.max(entry.getValue(), totalRemaining.getOrDefault(item, entry.getValue())));
+            while (goal > entry.getValue() && extraSlotsNeeded(goal, stock) > allocated + free) goal--;
+            int added = Math.max(0, extraSlotsNeeded(goal, stock) - allocated);
+            if (added > free) continue;
+            slots.put(item, allocated + added);
+            free -= added;
+            entry.setValue(goal);
+        }
+        return new Plan<>(plan.demand(), desired, slots);
     }
 
     public static <T> Plan<T> plan(List<List<T>> bands, Map<T, Stock> inventory, int emptySlots) {
@@ -46,7 +69,7 @@ public final class MapArtSupplyPlanner {
             for (T item : reservationOrder) {
                 Stock stock = inventory.get(item);
                 int required = demand.getOrDefault(item, 0) + bandDemand.get(item);
-                if (!stock.replenishable() || required <= stock.count()) continue;
+                if (!stock.replenishable() || stock.deferred() || required <= stock.count()) continue;
                 int firstStackSlots = extraSlotsNeeded(stock.count() + 1, stock);
                 int allocated = slots.getOrDefault(item, 0);
                 if (allocated < firstStackSlots && free > 0) {
@@ -77,15 +100,18 @@ public final class MapArtSupplyPlanner {
         Map<T, Integer> desired = new LinkedHashMap<>();
         for (Map.Entry<T, Integer> entry : demand.entrySet()) {
             Stock stock = inventory.get(entry.getKey());
+            // Only complete incoming stacks can be taken. A partial merge
+            // gap alone must not advertise a quota that cannot be loaded.
+            int room = Math.max(0, stock.capacity() - stock.count())
+                + slots.getOrDefault(entry.getKey(), 0) * stock.stackSize();
             int capacity = stock.replenishable()
-                ? stock.capacity() + slots.getOrDefault(entry.getKey(), 0) * stock.stackSize()
-                : stock.count();
+                ? stock.count() + room / stock.stackSize() * stock.stackSize() : stock.count();
             desired.put(entry.getKey(), Math.min(entry.getValue(), capacity));
         }
         return new Plan<>(demand, desired, slots);
     }
 
-    private static int extraSlotsNeeded(int required, Stock stock) {
+    static int extraSlotsNeeded(int required, Stock stock) {
         int deficit = Math.max(0, required - stock.count());
         int transfer = ((deficit + stock.stackSize() - 1) / stock.stackSize()) * stock.stackSize();
         int extraCapacity = Math.max(0, stock.count() + transfer - stock.capacity());

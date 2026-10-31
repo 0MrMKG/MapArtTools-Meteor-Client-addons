@@ -18,10 +18,10 @@ public final class RoundTripSupplyTest {
 
         var tight = MapArtSupplyPlanner.planRoundTrip(List.of(repeat("white",500),repeat("red",10)),
             Map.of("white",stock(0,0),"red",stock(0,0)),2);
-        equal(1,tight.extraSlots().get("white"),"outward color gets one slot");
-        equal(1,tight.extraSlots().get("red"),"return-only color reserves slot before large outward patch");
-        equal(64,tight.desired().get("white"),"capacity-limited outward quota");
-        equal(10,tight.desired().get("red"),"small return quota is exact");
+        equal(2,tight.extraSlots().get("white"),"active band gets the available slots before return-only colors");
+        equal(0,tight.extraSlots().getOrDefault("red",0),"future color cannot reduce active-band stock");
+        equal(128,tight.desired().get("white"),"capacity-limited outward quota");
+        check(!tight.desired().containsKey("red"),"return leg waits when even the active band cannot fit");
 
         var shared = MapArtSupplyPlanner.planRoundTrip(List.of(repeat("a",60),repeat("a",70)),Map.of("a",stock(100,128)),1);
         equal(130,shared.desired().get("a"),"same color aggregated across both legs");
@@ -51,7 +51,7 @@ public final class RoundTripSupplyTest {
         String demand=section(source,"private List<List<ProjectionTarget>> upcomingTargetBands()","private Map<Item, Integer> materialCounts(");
         check(demand.contains("for (int lane : supplyWindowLanes)")&&demand.contains("!needsMaterial(target)"),"include deferred first leg, exclude completed/wrong cells");
         check(demand.indexOf("byLane.put(active") < demand.indexOf("for (int lane : supplyWindowLanes)"),"current return leg leads its pair's ordering");
-        System.out.println("RoundTripSupply: paired quotas, return-color reservation, partial/full inventory, last band, deferred supply and worker wiring passed.");
+        System.out.println("RoundTripSupply: active-band priority, spare return stock, partial/full inventory, last band, deferred supply and worker wiring passed.");
     }
     private static List<String> repeat(String item,int count){return Collections.nCopies(count,item);}
     private static MapArtSupplyPlanner.Stock stock(int count,int capacity){return new MapArtSupplyPlanner.Stock(count,capacity,64,true,false);}

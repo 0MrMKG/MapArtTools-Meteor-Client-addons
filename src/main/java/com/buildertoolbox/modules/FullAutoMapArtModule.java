@@ -24,6 +24,7 @@ import com.buildertoolbox.fullauto.BatchInspection;
 import com.buildertoolbox.fullauto.OpeningBandSupply;
 import com.buildertoolbox.fullauto.WalkingProgress;
 import com.buildertoolbox.fullauto.SupplyTrip;
+import com.buildertoolbox.fullauto.ProducerSupplyReserve;
 import com.buildertoolbox.fullauto.SweepStride;
 import com.buildertoolbox.fullauto.StationaryRestockWatchdog;
 import com.buildertoolbox.fullauto.StorageBlockUtils;
@@ -312,6 +313,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final Set<Integer> snakeEntryWaypoints = new HashSet<>();
     private final Set<BlockPos> rejectedSupplyStands = new HashSet<>();
     private final SupplyTrip<Item, BlockPos> supplyTrip = new SupplyTrip<>();
+    private Map<Item, Integer> restockBandDemand = Map.of();
 
     private final FullAutoPlacementEngine printer = new FullAutoPlacementEngine();
     private TaskState state = TaskState.IDLE;
@@ -369,6 +371,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private long lastProgressTick;
     private long supplyRetryAt;
     private final Map<BlockPos, Long> unreachableSupplyUntil = new HashMap<>();
+    private final ProducerSupplyReserve<BlockPos> producerSupplyReserve = new ProducerSupplyReserve<>();
     private long nextActionTick;
     private int cursorSpaceAttempts, cursorSpaceCount = -1;
     private Item cursorSpaceItem;
@@ -2259,37 +2262,19 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private boolean selectNextSupply(Item preferred) {
-        List<List<ProjectionTarget>> bands = upcomingTargetBands();
-        if (bands.isEmpty()) return false;
-        List<List<Item>> materialBands = new ArrayList<>();
+        if (!supplyTrip.planned()) prepareSupplyTrip();
+        // The work coordinates and quotas were captured before leaving the
+        // band. Chest changes only reconcile the small inventory snapshot.
         Map<Item, MapArtSupplyPlanner.Stock> inventory = new HashMap<>();
-        Map<Item, Integer> admitted = new HashMap<>();
         int empty = emptyInventorySlots();
-        for (List<ProjectionTarget> band : bands) {
-            List<Item> materials = new ArrayList<>();
-            for (ProjectionTarget target : band) {
-                Item item = target.state().getBlock().asItem();
-                // Remaining world demand may shrink, but this trip's quota
-                // must not expand after taking another color or stack.
-                if (admitted.getOrDefault(item,0) >= supplyTrip.limit(item,Integer.MAX_VALUE)) continue;
-                admitted.merge(item,1,Integer::sum);
-                materials.add(item);
-                inventory.computeIfAbsent(item, key -> new MapArtSupplyPlanner.Stock(
-                    countInventory(key), countInventory(key) + inventoryCapacity(key, empty),
-                    new ItemStack(key).getMaxCount(), !supplies.getOrDefault(key, List.of()).isEmpty(),
-                    isSupplyTemporarilyDeferred(key)));
-            }
-            materialBands.add(materials);
-        }
-        MapArtSupplyPlanner.Plan<Item> plan = MapArtSupplyPlanner.planRoundTrip(materialBands, inventory, empty);
-        supplyTrip.freezeGoals(plan.desired());
+        for (Item item : supplyTrip.goals().keySet()) inventory.put(item, supplyStock(item, empty));
         List<SupplyTrip.Source<Item,BlockPos>> sources = new ArrayList<>();
-        for (Map.Entry<Item, Integer> entry : plan.desired().entrySet()) {
+        for (Map.Entry<Item, Integer> entry : supplyTrip.goals().entrySet()) {
             Item item = entry.getKey();
             if (reviewRestocking && reviewSupplyTried.contains(item)) continue;
-            int held = countInventory(item);
+            int held = inventory.get(item).count();
             int deficit = supplyTrip.remaining(item, held, entry.getValue());
-            int reserved = plan.reservedForOthers(item);
+            int reserved = supplyTrip.reservedForOthers(item, inventory);
             if (deficit <= 0 || !hasUsableSupply(item, reserved)) continue;
             if (inventoryCapacity(item, reserved) <= 0) continue;
             for (BlockPos chest : supplies.getOrDefault(item,List.of()))
@@ -2303,17 +2288,55 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (selected == null) return false;
         if (reviewRestocking) reviewSupplyTried.add(selected);
         supplyItem = selected;
-        reservedSupplySlots = plan.reservedForOthers(selected);
+        reservedSupplySlots = supplyTrip.reservedForOthers(selected, inventory);
         supplyReceivedThisRound = 0;
         supplyLastTakeTick = -1;
         int capacity = inventoryCapacity(selected, reservedSupplySlots);
-        supplyAmount = Math.min(capacity, supplyTrip.remaining(selected, countInventory(selected), plan.desired().get(selected)));
+        supplyAmount = Math.min(capacity, supplyTrip.remaining(selected, countInventory(selected), Integer.MAX_VALUE));
         info("就近备料 %s：最近箱 %s，距离 %.1f 格，背包已有 %d，本趟补入 %d（整组取货）。",
             selected.getName().getString(), nearest.position().toShortString(),Math.sqrt(nearest.distanceSquared()),countInventory(selected),supplyAmount);
         supplyChest = null;
         resetRestockTransfer();
         resetNavigation();
         return true;
+    }
+
+    private MapArtSupplyPlanner.Stock supplyStock(Item item, int empty) {
+        int held = countInventory(item);
+        return new MapArtSupplyPlanner.Stock(held, held + inventoryCapacity(item, empty),
+            new ItemStack(item).getMaxCount(), !supplies.getOrDefault(item, List.of()).isEmpty(),
+            isSupplyTemporarilyDeferred(item));
+    }
+
+    /** Once per journey: active strip first, then the return strip, then bounded spare stock. */
+    private void prepareSupplyTrip() {
+        List<List<Item>> materialBands = new ArrayList<>();
+        Map<Item, MapArtSupplyPlanner.Stock> inventory = new HashMap<>();
+        int empty = emptyInventorySlots();
+        for (List<ProjectionTarget> band : upcomingTargetBands()) {
+            if (materialBands.size() >= RESTOCK_MAX_LOOKAHEAD_LANES) break;
+            List<Item> materials = new ArrayList<>();
+            for (ProjectionTarget target : band) {
+                Item item = target.state().getBlock().asItem();
+                materials.add(item);
+                inventory.computeIfAbsent(item, key -> supplyStock(key, empty));
+            }
+            materialBands.add(materials);
+        }
+        restockBandDemand = new LinkedHashMap<>();
+        if (!materialBands.isEmpty()) for (Item item : materialBands.getFirst())
+            restockBandDemand.merge(item, 1, Integer::sum);
+        MapArtSupplyPlanner.Plan<Item> plan = MapArtSupplyPlanner.planRoundTrip(materialBands, inventory, empty);
+        // The buffer never exceeds real remaining blueprint demand, and never
+        // takes slots needed to finish either of the planned bands.
+        Map<Item, Integer> totalRemaining = new HashMap<>();
+        for (ProjectionTarget target : new ArrayList<>(remainingTargets.values())) {
+            Item item = target.state().getBlock().asItem();
+            if (inventory.containsKey(item) && !blockedTargets.contains(target.pos()) && needsMaterial(target))
+                totalRemaining.merge(item, 1, Integer::sum);
+        }
+        plan = MapArtSupplyPlanner.withBuffer(plan, inventory, empty, totalRemaining, 32);
+        supplyTrip.freezeGoals(plan.desired());
     }
 
     private Map<Item, Integer> countNextLaneMaterials() {
@@ -2348,7 +2371,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private boolean isSupplyChestUnavailable(BlockPos pos) {
         Long until = unreachableSupplyUntil.get(pos);
         if (until != null && tick >= until) { unreachableSupplyUntil.remove(pos); until = null; }
-        return until != null;
+        return until != null || producerSupplyReserve.cooling(pos, tick);
     }
 
     private void deferSupplyChest(String reason) {
@@ -2363,6 +2386,31 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyOpenTick = supplyAimTick = -1;
         supplyOpenAttempts = 0;
         resetRestockTransfer(); resetNavigation();
+    }
+
+    private void pauseSupplyForProduction(int remaining) {
+        if (supplyChest != null) {
+            producerSupplyReserve.defer(supplyChest.toImmutable(), tick);
+            info("补给箱 %s 有 %d 个 %s，整组取货后需至少保留 %d 个；关闭箱子，约120秒后再试。",
+                supplyChest.toShortString(), remaining, supplyItem.getName().getString(), new ItemStack(supplyItem).getMaxCount());
+        }
+        closeSupplyScreen();
+        supplyChest = null; supplyStand = null;
+        stationaryRestock.reset(); stationaryRestockRecoveries = 0;
+        supplyOpenTick = supplyAimTick = -1; supplyOpenAttempts = 0;
+        resetRestockTransfer(); resetNavigation();
+        activity = "为地毯机保留一组原料，该箱等待生产约120秒";
+    }
+
+    private ProducerSupplyReserve.Take producerSupplyTake(ScreenHandler opened, int capacity) {
+        List<ProducerSupplyReserve.Stack> matching = new ArrayList<>();
+        int slots = StorageBlockUtils.storageSlots(opened);
+        for (int slot = 0; slot < slots; slot++) {
+            ItemStack stack = opened.getSlot(slot).getStack();
+            if (!stack.isEmpty() && stack.isOf(supplyItem))
+                matching.add(new ProducerSupplyReserve.Stack(slot, stack.getCount()));
+        }
+        return ProducerSupplyReserve.choose(matching, new ItemStack(supplyItem).getMaxCount(), capacity);
     }
 
     private boolean resumeStockedBand() {
@@ -2409,6 +2457,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         boolean didRestock = state == TaskState.RESTOCK;
         // Count the whole journey, never each container or each color.
         if (didRestock && restockTripsSinceCleanup < Integer.MAX_VALUE) restockTripsSinceCleanup++;
+        if (didRestock) {
+            int missing = restockBandDemand.entrySet().stream()
+                .mapToInt(entry -> Math.max(0, entry.getValue() - countInventory(entry.getKey()))).sum();
+            if (missing > 0) info("当前条带仍缺 %d 个材料，受背包容量或材料箱状态限制；先铺已有材料，腾出空间后再补。", missing);
+        }
+        restockBandDemand = Map.of();
         closeSupplyScreen();
         resetRestockTransfer();
         resetNavigation();
@@ -2488,7 +2542,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private boolean hasPendingSupplyRecheck() {
         emptySupplyUntil.entrySet().removeIf(entry -> tick >= entry.getValue());
         unreachableSupplyUntil.entrySet().removeIf(entry -> tick >= entry.getValue());
-        return !emptySupplyUntil.isEmpty() || !unreachableSupplyUntil.isEmpty();
+        return !emptySupplyUntil.isEmpty() || !unreachableSupplyUntil.isEmpty() || producerSupplyReserve.pending(tick);
     }
 
     private void beginSupplyRecheckWait() {
@@ -2516,10 +2570,14 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void tickSupplyRecheckWait() {
         if (tick % 20 == 0 && resumeStockedBand()) return;
-        if (hasPendingSupplyRecheck() || tick < supplyRetryAt) {
+        // A ready source can resume work even if another producer is still
+        // cooling. Do not wait for every registered container's timer.
+        boolean sourceReady = tick % 20 == 0 && tick >= supplyRetryAt && hasPotentialWorkFrom(0);
+        if (!sourceReady && (hasPendingSupplyRecheck() || tick < supplyRetryAt)) {
             long nextCheck = java.util.stream.LongStream.of(
                 emptySupplyUntil.values().stream().mapToLong(Long::longValue).min().orElse(Long.MAX_VALUE),
                 unreachableSupplyUntil.values().stream().mapToLong(Long::longValue).min().orElse(Long.MAX_VALUE),
+                producerSupplyReserve.nextRetry(tick),
                 tick < supplyRetryAt ? supplyRetryAt : Long.MAX_VALUE).min().orElse(tick+20);
             long seconds = Math.max(1, (nextCheck - tick + 19) / 20);
             activity = "等待材料箱复查：约 " + seconds + " 秒";
@@ -2752,6 +2810,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                     activity = "箱内有材料，但当前预留背包空间装不下整组；继续其它颜色";
                     warning("%s 的箱内有货，但当前可用背包空间不足；背包腾出空间后再取，不标记为无货。",
                         supplyItem.getName().getString());
+                } else if (supplies.getOrDefault(supplyItem,List.of()).stream().anyMatch(pos -> producerSupplyReserve.cooling(pos,tick))) {
+                    activity = "同色生产箱保留种料中，等待约2分钟后再补；先处理其它材料";
                 } else if (supplies.getOrDefault(supplyItem,List.of()).stream().anyMatch(pos -> unreachableSupplyUntil.getOrDefault(pos,0L)>tick)) {
                     activity = "同色箱暂不可达，先继续其他颜色，冷却后自动重试";
                     warning("%s 的箱子存在寻路/开箱失败，未记为无货；先处理其他条带。", supplyItem.getName().getString());
@@ -2878,6 +2938,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 resetRestockTransfer();
                 nextActionTick = tick + 1;
                 activity = "已取到 " + moved + " 个 " + supplyItem.getName().getString();
+                // Also mark the box when this take completed our quota, so a
+                // new short trip cannot immediately reopen the seed-only box.
+                ProducerSupplyReserve.Take left = producerSupplyTake(opened, Integer.MAX_VALUE);
+                if (left.reserveLimited()) pauseSupplyForProduction(left.total());
                 return;
             }
             if (tick - restockTransferTick < timeoutTicks) {
@@ -2918,41 +2982,22 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             resetNavigation();
             return;
         }
-        int slots = StorageBlockUtils.storageSlots(opened);
-        boolean matchingStockPresent = false;
-        int smallestMatchingStack = Integer.MAX_VALUE;
-        for (int slot = 0; slot < slots; slot++) {
-            ItemStack stack = opened.getSlot(slot).getStack();
-            if (!stack.isEmpty() && labelId.equals(Registries.ITEM.getId(stack.getItem()))) {
-                matchingStockPresent = true;
-                smallestMatchingStack = Math.min(smallestMatchingStack, stack.getCount());
-                if (stack.getCount() > safeCapacity) continue;
-                // Move the entire chest stack in one quick-move. A smaller
-                // remaining quota may be overfilled by one stack, but we
-                // never split it or leave material on the cursor.
-                restockInventoryBefore = countInventory(supplyItem);
-                batch.rememberCursorOrigin(opened,slot);
-                mc.interactionManager.clickSlot(opened.syncId,slot,0,SlotActionType.QUICK_MOVE,mc.player);
-                restockTransferTick = tick;
-                restockTransferStartedUnfocused = !mc.isWindowFocused();
-                nextActionTick = tick + 1;
-                activity = "从补给箱取 " + supplyItem.getName().getString();
-                return;
-            }
-        }
-        if (!matchingStockPresent && tick - (supplyLastTakeTick >= 0 ? supplyLastTakeTick : supplyInventoryReadyTick) < 20) {
-            activity = "等待生产箱补入下一组材料";
+        ProducerSupplyReserve.Take take = producerSupplyTake(opened, safeCapacity);
+        if (take.reserveLimited()) { pauseSupplyForProduction(take.total()); return; }
+        if (take.slot() >= 0) {
+            // Only a complete stack that leaves one full stack's worth of
+            // this exact material in storage is eligible for quick-move.
+            int slot = take.slot();
+            restockInventoryBefore = countInventory(supplyItem);
+            batch.rememberCursorOrigin(opened,slot);
+            mc.interactionManager.clickSlot(opened.syncId,slot,0,SlotActionType.QUICK_MOVE,mc.player);
+            restockTransferTick = tick;
+            restockTransferStartedUnfocused = !mc.isWindowFocused();
+            nextActionTick = tick + 1;
+            activity = "从补给箱取 " + supplyItem.getName().getString() + "，保留一组种料";
             return;
         }
-        if (!matchingStockPresent) {
-            // A registered producer is expected to be stocked. If the fully
-            // synchronized view stays empty, treat it as an access/sync failure,
-            // not as a different kind of same-color box.
-            deferSupplyChest("已同步库存中未显示登记物品");
-            return;
-        } else {
-            rememberTakeCapacity(supplyItem, smallestMatchingStack);
-        }
+        rememberTakeCapacity(supplyItem, take.minimumTake());
         closeSupplyScreen();
         supplyChest = null;
         resetRestockTransfer();
@@ -3009,8 +3054,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void refreshSupplyAmount() {
         if (supplyItem == null) return;
-        int unfinished = countUpcomingMaterials().getOrDefault(supplyItem, 0);
-        supplyAmount = Math.min(supplyAmount, supplyTrip.remaining(supplyItem, countInventory(supplyItem), unfinished));
+        supplyAmount = Math.min(supplyAmount, supplyTrip.remaining(supplyItem, countInventory(supplyItem), Integer.MAX_VALUE));
     }
 
     private void resetRestockTransfer() {
@@ -3573,6 +3617,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void resetRuntime() {
+        restockBandDemand = Map.of();
         overflow.stop(); overflowRestockTarget = null; skipOverflowOnce = false; nextOverflowCheckTick = 0;
         openingCleanupPending = openingCleanupInProgress = false;
         restockTripsSinceCleanup = 0;
@@ -3637,6 +3682,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         lastProgressTick = 0;
         supplyRetryAt = 0;
         unreachableSupplyUntil.clear();
+        producerSupplyReserve.clear();
         nextActionTick = 0;
         reviewingRepair = false;
         reviewAttempted.clear();

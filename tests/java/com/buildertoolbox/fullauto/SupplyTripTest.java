@@ -55,14 +55,14 @@ public final class SupplyTripTest {
         String select=section(code,"private boolean selectNextSupply(","private Map<Item, Integer> countNextLaneMaterials(");
         check(select.contains("supplyTrip.nearest(sources)")&&!select.contains("selectedPriority")
             &&!select.contains("item == preferred"),"distance must be primary in real worker wiring");
-        check(select.contains("supplyTrip.limit(item,Integer.MAX_VALUE)")&&select.contains("supplyTrip.freezeGoals(plan.desired())")
+        check(select.contains("if (!supplyTrip.planned()) prepareSupplyTrip()")&&select.contains("supplyTrip.freezeGoals(plan.desired())")
             &&!select.contains("supplyTrip.clear()"),"selection reuses bounded goals and trip visits");
         String begin=section(code,"private void beginRestock(","private WorkChoice findStockedTarget()");
         check(begin.indexOf("supplyTrip.clear()")<begin.indexOf("selectNextSupply("),"fresh visit budget starts only on a new trip");
         String transfer=section(code,"private void tickRestock()","private void refreshSupplyAmount()");
         check(transfer.contains("!supplyTrip.visited(pos)")&&transfer.contains("supplyTrip.visit(nearest)")
             &&transfer.contains("supplyAmount -= moved"),"keep taking at current box until quota reached and record actual visits");
-        check(transfer.indexOf("supplyInventorySyncId != opened.syncId") < transfer.indexOf("boolean matchingStockPresent")
+        check(transfer.indexOf("supplyInventorySyncId != opened.syncId") < transfer.indexOf("ProducerSupplyReserve.Take take")
             &&transfer.contains("tick-supplyInventoryReadyTick < 2")&&code.contains("inventory.syncId() > 0"),
             "opening a handler without its full inventory must never be classified as an empty chest");
         check(!select.contains("returnBeforeDistantSource")&&!code.contains("partialSupplyUntilUsed"),
@@ -79,8 +79,8 @@ public final class SupplyTripTest {
             &&transfer.indexOf("findNearestLabelItem(") > transfer.indexOf("if (opened == null) {")
             &&transfer.contains("labelId.equals(registeredId)")&&transfer.contains("labelId.equals(requiredId)"),
             "unloaded remote frames cannot skip a source; live label IDs must still be verified on arrival");
-        check(transfer.contains("已同步库存中未显示登记物品")&&!transfer.contains("emptySupplyChestUntil"),
-            "equivalent producer boxes are not assigned different stock priorities");
+        check(transfer.contains("pauseSupplyForProduction(take.total())")&&!transfer.contains("等待生产箱补入下一组材料")
+            &&!transfer.contains("emptySupplyChestUntil"),"seed-limited producers are closed for cooldown instead of drained or watched");
         System.out.println("SupplyTrip: near production area first, fallback, frozen quotas, cross-color visits, slot reservations and worker wiring passed.");
     }
     private static String section(String code,String from,String to){int a=code.indexOf(from),b=code.indexOf(to,a+from.length());check(a>=0&&b>a,"source section");return code.substring(a,b);}

@@ -39,12 +39,12 @@ public final class OpeningBandSupplyTest {
 
         var demand=List.of(Collections.nCopies(80,"white"),Collections.nCopies(40,"red"));
         var full=MapArtSupplyPlanner.planRoundTrip(demand,Map.of("white",stock(64,64),"red",stock(0,0)),0);
-        check(full.desired().get("red")==0,"two reserved map slots cannot be counted as carpet capacity");
+        check(full.desired().getOrDefault("red",0)==0,"two reserved map slots cannot be counted as carpet capacity");
         var freed=MapArtSupplyPlanner.planRoundTrip(demand,Map.of("white",stock(64,64),"red",stock(0,0)),1);
-        check(freed.desired().get("red")==40,"the newly free slot serves the absent opening color");
-        check(freed.extraSlots().getOrDefault("white",0)==0,"existing opening color cannot crowd out missing return color");
-        check(freed.desired().get("white")==64,"capacity-limited preloading preserves usable held stock");
-        System.out.println("OpeningBandSupply: forward/reverse geometry, one-time preparation, full-bag deferral, free-slot recovery and return-color reservation passed.");
+        check(freed.desired().getOrDefault("red",0)==0,"return-only color waits for the next available slot");
+        check(freed.extraSlots().getOrDefault("white",0)==1,"the freed slot first completes the active opening band");
+        check(freed.desired().get("white")==80,"current band can finish before another supply trip");
+        System.out.println("OpeningBandSupply: forward/reverse geometry, one-time preparation, full-bag deferral, free-slot recovery and active-band priority passed.");
     }
     private static MapArtSupplyPlanner.Stock stock(int count,int capacity){return new MapArtSupplyPlanner.Stock(count,capacity,64,true,false);}
     private static void check(boolean condition,String message){if(!condition)throw new AssertionError(message);}
