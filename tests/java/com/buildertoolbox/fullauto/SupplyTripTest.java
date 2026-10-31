@@ -28,6 +28,15 @@ public final class SupplyTripTest {
         check(trip.limit("red",512)==128&&trip.limit("blue",512)==64,"replanning cannot grow a trip's quota");
         check(trip.limit("green",64)==0,"new future demand cannot extend an ongoing trip");
         check(trip.limit("red",30)==30,"other player's completed cells reduce current demand");
+        check(trip.remaining("red",128,512)==0,"a fulfilled frozen quota cannot request a second same-color box for future demand");
+        check(trip.remaining("red",192,512)==0,"whole-stack overfill never creates another visit");
+        check(trip.remaining("red",64,512)==64,"an actually short quota can still use a fallback source");
+        check(trip.remaining("red",40,30)==0,"shrinking world demand cancels an already selected source");
+        check(trip.remaining("green",0,64)==0,"future colors outside this trip cannot cause a chest tour");
+        // Delayed stock synchronization can arrive after choosing the fallback
+        // but before opening it: the same fixed demand must then cancel travel.
+        check(trip.remaining("blue",0,128)==64,"blue initially needs its first stack");
+        check(trip.remaining("blue",64,128)==0,"late arrival of that stack cancels a second blue visit");
         check(trip.nearest(List.of(new SupplyTrip.Source<>("red","bad",Double.NaN),redB)).equals(redB),"invalid distances cannot win");
         trip.clear();trip.freezeGoals(Map.of("red",64));
         check(trip.nearest(List.of(redA,redB)).equals(redA),"a new genuine supply trip can reuse a productive near box");

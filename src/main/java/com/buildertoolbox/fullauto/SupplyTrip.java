@@ -18,6 +18,10 @@ public final class SupplyTrip<I, P> {
     public int limit(I item, int demand) {
         return goals == null ? demand : Math.min(demand, goals.getOrDefault(item, 0));
     }
+    /** Live inventory satisfies a fixed trip quota even if a selected source is still en route. */
+    public int remaining(I item, int held, int demand) {
+        return Math.max(0, limit(item, Math.max(0, demand)) - Math.max(0, held));
+    }
     public boolean visited(P position) { return visited.contains(position); }
     public void visit(P position) { visited.add(position); }
     public void forget(P position) { visited.remove(position); }

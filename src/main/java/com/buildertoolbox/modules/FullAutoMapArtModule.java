@@ -27,6 +27,8 @@ import com.buildertoolbox.fullauto.SupplyTrip;
 import com.buildertoolbox.fullauto.SweepStride;
 import com.buildertoolbox.fullauto.StationaryRestockWatchdog;
 import com.buildertoolbox.fullauto.StorageBlockUtils;
+import com.buildertoolbox.fullauto.OverflowStorageController;
+import com.buildertoolbox.fullauto.OverflowMaterialPlanner;
 import fi.dy.masa.litematica.data.DataManager;
 import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
@@ -191,6 +193,21 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         .onChanged(this::restoreSupplyList)
         .build()
     );
+
+    private final Setting<Boolean> registerOverflow = sgSupply.add(new BoolSetting.Builder()
+        .name("Select Overflow Chests")
+        .description("Hide settings, right-click containers to register multiple surplus-material chests, Esc returns. No item-frame or sign required.")
+        .defaultValue(false).onChanged(this::onRegisterOverflowChanged).build());
+
+    private final Setting<List<String>> registeredOverflow = sgSupply.add(new StringListSetting.Builder()
+        .name("Overflow Chest List")
+        .description("Saved X,Y,Z positions for surplus materials. No labels or sorting required; nearest available chest is used first.")
+        .defaultValue(new String[0]).build());
+
+    private final Setting<Integer> restockTripsPerCleanup = sgSupply.add(new IntSetting.Builder()
+        .name("Restock Trips Per Cleanup")
+        .description("After this many completed supply trips, return surplus before the next trip. Multiple chests/colors in one trip count once. Each new picture cleans first; a full bag may clean earlier.")
+        .defaultValue(3).range(1, 100).sliderRange(1, 20).build());
 
     private final Setting<Boolean> autoBandWidth = sgGeneral.add(new BoolSetting.Builder()
         .name("Auto Band Width")
@@ -404,6 +421,13 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private TaskState stateBeforeRegistration = TaskState.IDLE;
     private String activity = "空闲";
     private final MapArtBatchController batch = new MapArtBatchController(this, mc);
+    private final OverflowStorageController overflow = new OverflowStorageController(mc);
+    private ProjectionTarget overflowRestockTarget;
+    private boolean skipOverflowOnce;
+    private long nextOverflowCheckTick;
+    private boolean openingCleanupPending;
+    private boolean openingCleanupInProgress;
+    private int restockTripsSinceCleanup;
     private BatchLocation batchLocation = BatchLocation.NONE;
     private boolean validatingDirectory;
     private long directoryValidationGeneration;
@@ -425,6 +449,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         validation.add(theme.label("Set Reset Start Map above (1-based, inclusive). Validation resets progress; enable afterward."));
         validation.add(theme.label("Earlier pictures are skipped. The selected picture is cleared and rebuilt, not resumed."));
         validation.add(theme.label("Checks file access only; blueprint dimensions/alignment are checked on batch start."));
+        WSection overflowHelp = root.add(theme.section("Overflow Storage", false)).expandX().widget();
+        overflowHelp.add(theme.label("Registered surplus chests: " + overflowPositions().size() + ". Right-click to add, Esc returns."));
+        overflowHelp.add(theme.label("Optional: no registered overflow chests means cleanup is skipped. Otherwise clean first, then every configured number of supply trips."));
+        overflowHelp.add(theme.label("Keeps the upcoming outward/return pair. Only surplus map materials are stored; no items are discarded."));
         WSection section = theme.section("Color Filter - checked colors are skipped", true);
         root.add(section).expandX();
         WHorizontalList controls = section.add(theme.horizontalList()).expandX().widget();
@@ -575,7 +603,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         overrideFocusPause();
         if (supplies.isEmpty() && !registeredSupplies.get().isEmpty()) restoreSupplyList(registeredSupplies.get());
-        if (registerSupply.get() || batchLocation != BatchLocation.NONE) {
+        if (registerSupply.get() || registerOverflow.get() || batchLocation != BatchLocation.NONE) {
             state = TaskState.REGISTERING;
             startAfterRegistration = false;
             activity = "Select chests: right-click to add, Esc to exit";
@@ -595,6 +623,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         autoEater.stop();
         MapArtModeGuard.end(this);
         batch.stop();
+        overflow.stop(); overflowRestockTarget = null;
         clearBatchSelectors();
         if (state != TaskState.IDLE && statusMessages.get()) {
             printProgress("已停止：" + activity, completedMatrixCells(), System.nanoTime(), null);
@@ -607,6 +636,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         restoreFocusPause();
         resetNavigation();
         if (registerSupply.get()) registerSupply.set(false);
+        if (registerOverflow.get()) registerOverflow.set(false);
         state = TaskState.IDLE;
         activity = "空闲";
         AutomationControl.release(this);
@@ -627,6 +657,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         // Esc remains a normal menu. Only our own supply UI stays behind it;
         // the server's handler is installed before this screen event fires.
         if (!(mc.currentScreen instanceof GameMenuScreen)) return;
+        if (overflow.closingMenu() && event.screen == null) { event.cancel(); return; }
+        if (overflow.hidesScreen(event.screen)) { event.cancel(); return; }
         if (batch.closingMenu() && event.screen == null) { event.cancel(); return; }
         if (batch.hidesScreen(event.screen)) { event.cancel(); return; }
         if (closingSupplyBehindMenu && event.screen == null) event.cancel();
@@ -665,6 +697,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (ownedSupplyHandler != null && mc.player.currentScreenHandler != ownedSupplyHandler) {
             ownedSupplyHandler = null; supplyOpenTick = supplyAimTick = -1;
         }
+        overflow.claimPendingHandler(tick);
         if (recoverStationaryRestock()) {
             sendStatusHeartbeat();
             return;
@@ -726,6 +759,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             return true;
         }
         if (state == TaskState.RESTOCK) {
+            if (overflow.active() && !overflow.prepareForAutoEat(tick)) return false;
             // Finish an outstanding transfer/open response before interrupting it.
             if (restockTransferTick >= 0 || supplyOpenTick >= 0
                 && mc.player.currentScreenHandler == mc.player.playerScreenHandler) return false;
@@ -783,8 +817,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             activity = "右键登记 " + batchLocation + "，Esc 返回设置";
             return;
         }
-        if (registerSupply.get()) {
-            activity = "Select chests: right-click to add, Esc to exit";
+        if (registerSupply.get() || registerOverflow.get()) {
+            activity = registerOverflow.get() ? "选择回收箱：右键添加多个箱子，Esc 返回" : "Select chests: right-click to add, Esc to exit";
             return;
         }
         if (startAfterRegistration) {
@@ -798,7 +832,24 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void onRegisterSupplyChanged(boolean enabled) {
         if (!enabled) return;
+        if (registerOverflow.get()) registerOverflow.set(false);
+        beginChestSelection();
+    }
+
+    private void onRegisterOverflowChanged(boolean enabled) {
+        if (!enabled) return;
+        if (registerSupply.get()) registerSupply.set(false);
+        beginChestSelection();
+    }
+
+    private void beginChestSelection() {
+        if (mc.player == null || mc.world == null || !mc.player.currentScreenHandler.getCursorStack().isEmpty()) {
+            registerSupply.set(false); registerOverflow.set(false);
+            warning("请先进入世界并放回鼠标持有的物品，再选择箱子"); return;
+        }
         batch.stop();
+        overflow.stop(); overflowRestockTarget = null;
+        if (state == TaskState.RESTOCK) closeSupplyScreen();
         clearBatchSelectors();
         if (!isActive()) {
             // The mouse event is delivered only while the module is active.
@@ -825,17 +876,19 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             selectBatchPosition();
             return;
         }
-        if (!isActive() || !registerSupply.get() || mc.player == null || mc.world == null
+        if (!isActive() || (!registerSupply.get() && !registerOverflow.get()) || mc.player == null || mc.world == null
+            || mc.currentScreen != null
             || event.action != KeyAction.Press) return;
 
         if (event.button() != GLFW.GLFW_MOUSE_BUTTON_RIGHT) return;
         // The registration action must not also open the selected container.
         event.cancel();
         if (!(mc.crosshairTarget instanceof BlockHitResult hit) || !isSupplyContainer(hit.getBlockPos())) {
-            warning("Right-click a labeled chest, barrel or shulker box.", new Object[0]);
+            warning(registerOverflow.get() ? "请右键箱子、木桶或潜影盒，无需标签" : "Right-click a labeled chest, barrel or shulker box.", new Object[0]);
             return;
         }
-        registerContainer(hit.getBlockPos());
+        if (registerOverflow.get()) registerOverflowContainer(hit.getBlockPos());
+        else registerContainer(hit.getBlockPos());
     }
 
     @EventHandler
@@ -845,7 +898,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             activity="位置已保存，重新开启本模块即可自动开始或恢复批次";
             mc.setScreen(GuiThemes.get().moduleScreen(this));return;
         }
-        if (!isActive() || !registerSupply.get() || event.action != KeyAction.Press
+        if (!isActive() || (!registerSupply.get() && !registerOverflow.get()) || event.action != KeyAction.Press
             || event.key() != GLFW.GLFW_KEY_ESCAPE) return;
         event.cancel();
         exitRegistration();
@@ -854,6 +907,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (!isActive() || mc.world == null || mc.player == null) return;
+        if (registerOverflow.get()) {
+            for (BlockPos pos : overflowPositions())
+                event.renderer.box(pos, null, new Color(255, 220, 45, 255), ShapeMode.Lines, 0);
+            return;
+        }
         if (batchLocation != BatchLocation.NONE) {
             for (Setting<String> setting : List.of(canvasOrigin, clearLever, mapSupply, cartographyTable, productStorage)) {
                 BlockPos pos=StorageBlockUtils.parsePosition(setting.get());
@@ -908,7 +966,23 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void exitRegistration() {
         registerSupply.set(false);
+        registerOverflow.set(false);
+        state = TaskState.PAUSED;
+        activity = "位置已保存，重新开启本模块即可自动开始或恢复批次";
         mc.setScreen(GuiThemes.get().moduleScreen(this));
+    }
+
+    private List<BlockPos> overflowPositions() {
+        return registeredOverflow.get().stream().map(StorageBlockUtils::parsePosition)
+            .filter(java.util.Objects::nonNull).distinct().toList();
+    }
+
+    private void registerOverflowContainer(BlockPos pos) {
+        List<BlockPos> positions = overflowPositions();
+        if (positions.contains(pos)) { warning("该回收箱已登记：%s", pos.toShortString()); return; }
+        List<String> saved = new ArrayList<>(registeredOverflow.get());
+        saved.add(StorageBlockUtils.position(pos)); registeredOverflow.set(saved);
+        info("回收箱已登记：%s，共 %d 个", pos.toShortString(), positions.size() + 1);
     }
 
     private Item findNearestLabelItem(BlockPos container, int radius) {
@@ -1073,6 +1147,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void applyWorkPlanUpdate() {
+        openingCleanupPending |= openingCleanupInProgress;
+        openingCleanupInProgress = false;
+        overflow.stop(); overflowRestockTarget = null; skipOverflowOnce = false;
         releaseMovement();
         if (!mc.player.currentScreenHandler.getCursorStack().isEmpty()) {
             activity = "等待背包操作结束后更新蛇形路线和颜色筛选";
@@ -1146,6 +1223,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             activity = "等待刚放置的方块确认";
             return;
         }
+        if (serviceOpeningCleanup()) return;
         if (serviceNavigationRecovery()) return;
         if (resumeSupplyPending) {
             resumeSupplyPending = false;
@@ -1162,6 +1240,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             tickReturnFromRestock();
             return;
         }
+        if (serviceOverflowForCapacity()) return;
         if (serviceOpeningBands()) return;
         if (finishingLane >= 0) {
             int lane = finishingLane;
@@ -1936,6 +2015,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             activity = "等待在途放置确认后直接补货";
             return;
         }
+        boolean allowOverflow = !skipOverflowOnce;
+        skipOverflowOnce = false;
+        if (allowOverflow && beginOverflowCleanup(current)) return;
         state = TaskState.WORK;
         BlockPos returnPos = restockReturnPos != null ? restockReturnPos : mc.player.getBlockPos().toImmutable();
         resetNavigation();
@@ -1972,6 +2054,130 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         info("往返两条带备料：剩余 %d 格，背包可覆盖 %d 格，缺口 %d；按颜色缺口和背包容量补充。",
             neededForBand, heldForBand, neededForBand - heldForBand);
         activity = "前往补给箱";
+    }
+
+    /** Capacity-independent trigger: an entirely full bag cannot rely on normal supply eligibility checks. */
+    private boolean serviceOverflowForCapacity() {
+        if (tick < nextOverflowCheckTick || overflow.active() || overflowPositions().isEmpty()
+            || emptyInventorySlots() > 0
+            || printer.hasQueuedProjectionPlacement() || !dispatchedPlacements.isEmpty()) return false;
+        nextOverflowCheckTick = tick + 20;
+        Map<Item, Integer> demand = countNextLaneMaterials();
+        for (List<ProjectionTarget> band : upcomingTargetBands()) {
+            for (ProjectionTarget target : band) {
+                Item item = target.state().getBlock().asItem();
+                if (countInventory(item) >= demand.getOrDefault(item, 0) || canTakeSupplyStack(item, 0)
+                    || supplies.getOrDefault(item, List.of()).isEmpty()) continue;
+                return beginOverflowCleanup(target);
+            }
+        }
+        return false;
+    }
+
+    /** A new image must finish its one-off cleanup before any supply visit or placement. */
+    private boolean serviceOpeningCleanup() {
+        if (!openingCleanupPending) return false;
+        openingCleanupPending = false;
+        if (overflowPositions().isEmpty()) return false;
+        ProjectionTarget first = targets.isEmpty() ? null : targets.getFirst();
+        for (List<ProjectionTarget> band : upcomingTargetBands()) {
+            if (band.isEmpty()) continue;
+            first = band.getFirst();
+            break;
+        }
+        if (beginOverflowCleanup(first, true)) {
+            resumeSupplyPending = false;
+            return true;
+        }
+        return false;
+    }
+
+    private boolean beginOverflowCleanup(ProjectionTarget current) {
+        return beginOverflowCleanup(current, false);
+    }
+
+    private boolean beginOverflowCleanup(ProjectionTarget current, boolean openingCleanup) {
+        List<BlockPos> positions = overflowPositions();
+        if (positions.isEmpty()) return false;
+        boolean scheduled = restockTripsSinceCleanup >= restockTripsPerCleanup.get();
+        if (!scheduled && !openingCleanup && emptyInventorySlots() > 0) return false;
+        Map<Item, Integer> demand = countNextLaneMaterials();
+        boolean blocked = demand.entrySet().stream().anyMatch(entry -> countInventory(entry.getKey()) < entry.getValue()
+            && !canTakeSupplyStack(entry.getKey(), 0));
+        if (!OverflowMaterialPlanner.cleanupDue(restockTripsSinceCleanup, restockTripsPerCleanup.get(), blocked, openingCleanup)) return false;
+        if (!overflow.begin(walkY, positions, demand, overflowMaterials(), tick)) {
+            // A scheduled check with nothing to return is still consumed. Do not
+            // inspect surplus again at every later chest visit.
+            if (scheduled || openingCleanup) restockTripsSinceCleanup = 0;
+            return false;
+        }
+        closeSupplyScreen();
+        resetRestockTransfer(); resetNavigation(); releaseMovement();
+        if (restockReturnPos == null) restockReturnPos = mc.player.getBlockPos().toImmutable();
+        // Saving/restarting during cleanup uses the existing restock checkpoint
+        // and the work anchor; inventory is reconciled afresh on the next run.
+        returningToCheckpoint = true;
+        returningFromRestock = false;
+        overflowRestockTarget = current;
+        openingCleanupInProgress = openingCleanup;
+        supplyChest = null; supplyItem = null; supplyStand = null;
+        supplyOpenTick = supplyAimTick = -1;
+        state = TaskState.RESTOCK;
+        activity = overflow.status();
+        info("%s；%s，按当前往返两条带保留材料，回存后再备货。",
+            activity, openingCleanup ? "开工首次清理" : scheduled
+                ? "已完成 " + restockTripsSinceCleanup + " 趟补货，定期清理" : "背包容量不足，提前腾位");
+        return true;
+    }
+
+    private Set<Item> overflowMaterials() {
+        Set<Item> eligible = new HashSet<>();
+        Set<Item> inspected = new HashSet<>();
+        Set<String> dyedFamilies = new HashSet<>();
+        for (ProjectionTarget target : projectionLayer) {
+            Item item = target.state().getBlock().asItem();
+            if (!inspected.add(item) || !returnableMapMaterial(item)) continue;
+            eligible.add(item);
+            Identifier id = Registries.ITEM.getId(item);
+            String color = MapArtColorFilter.colorOf(id.getNamespace(), id.getPath());
+            if (color != null) dyedFamilies.add(id.getPath().substring(color.length() + 1));
+        }
+        for (String family : dyedFamilies) for (String color : MapArtColorFilter.COLORS) {
+            Item item = Registries.ITEM.get(Identifier.of("minecraft", color + "_" + family));
+            if (returnableMapMaterial(item)) eligible.add(item);
+        }
+        // Old images may use carpet colors absent from this particular file.
+        for (int slot = 0; slot < 36; slot++) {
+            Item item = mc.player.getInventory().getStack(slot).getItem();
+            if (returnableMapMaterial(item) && item instanceof net.minecraft.item.BlockItem block
+                && block.getBlock() instanceof CarpetBlock) eligible.add(item);
+        }
+        return eligible;
+    }
+
+    private boolean returnableMapMaterial(Item item) {
+        if (!(item instanceof net.minecraft.item.BlockItem block) || item == Items.GLASS_PANE
+            || new ItemStack(item).get(net.minecraft.component.DataComponentTypes.FOOD) != null) return false;
+        return !(block.getBlock() instanceof ShulkerBoxBlock || block.getBlock() instanceof ChestBlock
+            || block.getBlock() instanceof BarrelBlock);
+    }
+
+    private void tickOverflowCleanup() {
+        boolean working = overflow.tick(overflowPositions(), tick);
+        activity = overflow.status();
+        if (working) return;
+        if (overflow.warning() != null) warning("%s", overflow.warning());
+        ProjectionTarget shortage = overflowRestockTarget;
+        overflowRestockTarget = null;
+        openingCleanupInProgress = false;
+        restockTripsSinceCleanup = 0;
+        state = TaskState.WORK;
+        if (shortage != null && !remainingTargets.isEmpty()) {
+            skipOverflowOnce = true;
+            beginRestock(shortage);
+        } else {
+            returningFromRestock = restockReturnPos != null;
+        }
     }
 
     private WorkChoice findStockedTarget() {
@@ -2082,7 +2288,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             Item item = entry.getKey();
             if (reviewRestocking && reviewSupplyTried.contains(item)) continue;
             int held = countInventory(item);
-            int deficit = entry.getValue() - held;
+            int deficit = supplyTrip.remaining(item, held, entry.getValue());
             int reserved = plan.reservedForOthers(item);
             if (deficit <= 0 || !hasUsableSupply(item, reserved)) continue;
             if (inventoryCapacity(item, reserved) <= 0) continue;
@@ -2101,7 +2307,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyReceivedThisRound = 0;
         supplyLastTakeTick = -1;
         int capacity = inventoryCapacity(selected, reservedSupplySlots);
-        supplyAmount = Math.min(capacity, Math.max(0, plan.desired().get(selected) - countInventory(selected)));
+        supplyAmount = Math.min(capacity, supplyTrip.remaining(selected, countInventory(selected), plan.desired().get(selected)));
         info("就近备料 %s：最近箱 %s，距离 %.1f 格，背包已有 %d，本趟补入 %d（整组取货）。",
             selected.getName().getString(), nearest.position().toShortString(),Math.sqrt(nearest.distanceSquared()),countInventory(selected),supplyAmount);
         supplyChest = null;
@@ -2201,6 +2407,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private void finishRestock() {
         boolean didRestock = state == TaskState.RESTOCK;
+        // Count the whole journey, never each container or each color.
+        if (didRestock && restockTripsSinceCleanup < Integer.MAX_VALUE) restockTripsSinceCleanup++;
         closeSupplyScreen();
         resetRestockTransfer();
         resetNavigation();
@@ -2300,6 +2508,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         releaseMovement();
         if (tick % 20 != 0) return;
         if (resumeStockedBand()) return;
+        if (serviceOverflowForCapacity()) return;
         if (!hasPotentialWorkFrom(0)) return;
         state = TaskState.WORK;
         activity = "背包已有可用空间，返回蛇形扫描路点";
@@ -2491,6 +2700,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void tickRestock() {
+        if (overflow.active()) { tickOverflowCleanup(); return; }
         // The batch controller settles any interrupted cursor operation before
         // this worker runs. Restocking itself still uses whole-stack quick move.
         if (supplyChest != null) {
@@ -2512,7 +2722,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 return;
             }
         }
-        if (supplyItem != null && supplyChest == null) refreshSupplyAmount();
+        // A delayed inventory update may already satisfy the quota while we
+        // are walking to a selected box. Check before moving/opening, while
+        // leaving an in-flight take alone until its confirmation is handled.
+        if (supplyItem != null && restockTransferTick < 0) refreshSupplyAmount();
         if (supplyItem == null || supplyAmount <= 0) {
             if (supplyItem != null) {
                 emptySupplyUntil.remove(supplyItem);
@@ -2797,7 +3010,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private void refreshSupplyAmount() {
         if (supplyItem == null) return;
         int unfinished = countUpcomingMaterials().getOrDefault(supplyItem, 0);
-        supplyAmount = Math.min(supplyAmount, Math.max(0, unfinished - countInventory(supplyItem)));
+        supplyAmount = Math.min(supplyAmount, supplyTrip.remaining(supplyItem, countInventory(supplyItem), unfinished));
     }
 
     private void resetRestockTransfer() {
@@ -3360,6 +3573,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void resetRuntime() {
+        overflow.stop(); overflowRestockTarget = null; skipOverflowOnce = false; nextOverflowCheckTick = 0;
+        openingCleanupPending = openingCleanupInProgress = false;
+        restockTripsSinceCleanup = 0;
         clearPreciseRepair();repairVisits.clear();deferredBandRepairs.clear();bandSupplyAttempts.clear();supplyWindowLanes.clear();openingBands.reset();boundaryEntryStand=sweepEndpointStand=null;
         observationCursor = 0;finishingLane = -1;deferredResumeTargets.clear();resumeSupplyPending = returningToCheckpoint = false;
         navigationNudge = unloadedTravelGoal = unloadedTravelProxy = null;
@@ -3518,6 +3734,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         for (Setting<Boolean> selector : List.of(selectCanvas, selectLever, selectMaps, selectCartography, selectProduct))
             if (selector != current && selector.get()) selector.set(false);
         if (registerSupply.get()) registerSupply.set(false);
+        if (registerOverflow.get()) registerOverflow.set(false);
         batchLocation = location;
         if (!isActive()) toggle();
         if (!isActive()) return;
@@ -3559,6 +3776,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private void onBatchPacket(PacketEvent.Receive event) {
         if (event.packet instanceof net.minecraft.network.packet.s2c.play.InventoryS2CPacket inventory
             && inventory.syncId() > 0) supplyInventorySyncId=inventory.syncId();
+        overflow.receive(event.packet);
         batch.receive(event.packet);
     }
 
@@ -3577,7 +3795,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     public String batchPreflight() {
         int empty = 0;
         for (int i=0; i<36; i++) if (mc.player.getInventory().getStack(i).isEmpty()) empty++;
-        if (empty < 2) return "开始清理前请为本轮地图和玻璃板预留两个空背包槽";
+        if (empty < 2 && overflowPositions().isEmpty())
+            return "开始清理前请为本轮地图和玻璃板预留两个空背包槽，或先登记开工回收箱";
         Map<Item, Integer> demand = new HashMap<>();
         for (ProjectionTarget target : projectionLayer) {
             if (!isExcludedColor(target.state())) demand.merge(target.state().getBlock().asItem(), 1, Integer::sum);
@@ -3612,7 +3831,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         supplyCheckedLane = -1;
         verificationPass = 0;
         buildSnakeWaypoints();
-        activity = "批次蛇形绘制";
+        openingCleanupPending = !overflowPositions().isEmpty();
+        openingCleanupInProgress = false;
+        restockTripsSinceCleanup = 0;
+        activity = openingCleanupPending ? "开工准备：先回存多余材料，再备货和铺设" : "开工准备：备货和铺设";
     }
 
     @Override
@@ -3629,7 +3851,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             : cursorSpaceOrigin == null ? mc.player.getBlockPos() : cursorSpaceOrigin;
         return new BatchPrintCheckpoint(workingBandWidth, reverseSnake.get(), snakeWaypointIndex,
             origin.getX(), origin.getZ(), resume.getX(), resume.getZ(), verificationPass, route,
-            resumeSupplyPending || state == TaskState.RESTOCK || state == TaskState.WAITING_SUPPLY_RECHECK || state == TaskState.WAITING_CAPACITY);
+            resumeSupplyPending || state == TaskState.RESTOCK || state == TaskState.WAITING_SUPPLY_RECHECK || state == TaskState.WAITING_CAPACITY,
+            openingCleanupPending || openingCleanupInProgress, restockTripsSinceCleanup);
     }
 
     @Override
@@ -3637,12 +3860,15 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         progressTimer.beginDrawing(System.nanoTime(), targets.size(), completedMatrixCells());
         if (checkpoint == null) {
             batchStartDrawing();
+            openingCleanupPending = false;
             info("断点续铺：旧进度没有路点记录，已根据实际方块重建剩余工作线，不重新清理画布");
             return;
         }
         workOrigin = new BlockPos(checkpoint.originX(), walkY, checkpoint.originZ());
         if (checkpoint.width() != workingBandWidth || checkpoint.reverse() != reverseSnake.get()) {
             batchStartDrawing();
+            openingCleanupPending = checkpoint.openingCleanup();
+            restockTripsSinceCleanup = checkpoint.restockTripsSinceCleanup();
             info("断点续铺：条带宽度或方向已调整，保留原起点并按新参数重建剩余路线");
             return;
         }
@@ -3659,6 +3885,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         snakeWaypointIndex = checkpoint.cursor();
         verificationPass = checkpoint.verificationPass();
+        openingCleanupPending = checkpoint.openingCleanup();
+        openingCleanupInProgress = false;
+        restockTripsSinceCleanup = checkpoint.restockTripsSinceCleanup();
         supplyCheckedLane = -1;
         snakeSweepCompleted = false;
         state = TaskState.WORK;
@@ -3694,6 +3923,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     @Override
     public void batchStopWorker() {
+        overflow.stop(); overflowRestockTarget = null;
         releaseMovement();
         cancelQueuedPlacements();
         if (state == TaskState.RESTOCK && mc.player != null && supplyOpenTick >= 0) closeSupplyScreen();
@@ -3708,10 +3938,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             || tick - lastPlacementDispatchTick < 2;
     }
     @Override public boolean batchWorkSweepFinished() { return state == TaskState.VERIFY; }
-    @Override public void batchHoldForReview() { releaseMovement(); }
+    @Override public void batchHoldForReview() { releaseMovement(); overflow.release(tick); }
     @Override public boolean batchOwnsContainer() {
-        return state == TaskState.RESTOCK && supplyChest != null && supplyOpenTick >= 0
-            && mc.player.currentScreenHandler == ownedSupplyHandler;
+        return overflow.owns(mc.player.currentScreenHandler)
+            || state == TaskState.RESTOCK && supplyChest != null && supplyOpenTick >= 0
+                && mc.player.currentScreenHandler == ownedSupplyHandler;
     }
     @Override public boolean batchCursorStorageAllowed(ItemStack stack) {
         return batchOwnsContainer() && supplyItem != null && stack.isOf(supplyItem);
@@ -3787,6 +4018,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             return true;
         }
         if (mc.player.currentScreenHandler != mc.player.playerScreenHandler || preciseRepairTarget != null) return false;
+        if (serviceOverflowForCapacity()) { reviewRestocking = true; return true; }
         ProjectionTarget best = null;
         ProjectionTarget missingMaterial = null;
         double nearest = Double.POSITIVE_INFINITY;
@@ -3864,7 +4096,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     @Override public int batchAllowedMissingBlocks() { return allowedMissingBlocks.get(); }
     @Override public int batchLane() { return snakeWaypointIndex < snakeWaypointLanes.size() ? snakeWaypointLanes.get(snakeWaypointIndex) : -1; }
     @Override public boolean batchWorkerPaused() { return state == TaskState.PAUSED; }
-    @Override public void batchPauseWorker(String reason) { releaseMovement(); state = TaskState.PAUSED; activity = reason; }
+    @Override public void batchPauseWorker(String reason) {
+        releaseMovement(); overflow.stop(); overflowRestockTarget = null;
+        state = TaskState.PAUSED; activity = reason;
+    }
     @Override public void batchStatus(String text) { activity = text; }
     @Override public void batchMessage(String text) {
         info(Text.empty()

@@ -5,31 +5,44 @@ import java.util.List;
 
 /** Durable snake cursor. World blocks, inventory clicks and held keys are deliberately not cached. */
 public record BatchPrintCheckpoint(int width, boolean reverse, int cursor, int originX, int originZ,
-                                   int resumeX, int resumeZ, int verificationPass, List<Step> route, boolean restocking) {
+                                   int resumeX, int resumeZ, int verificationPass, List<Step> route, boolean restocking,
+                                   boolean openingCleanup, int restockTripsSinceCleanup) {
     public record Step(int x, int z, int lane, boolean entry) { }
 
     public BatchPrintCheckpoint(int width, boolean reverse, int cursor, int originX, int originZ,
                                 int resumeX, int resumeZ, int verificationPass, List<Step> route) {
-        this(width, reverse, cursor, originX, originZ, resumeX, resumeZ, verificationPass, route, false);
+        this(width, reverse, cursor, originX, originZ, resumeX, resumeZ, verificationPass, route, false, false, 0);
+    }
+
+    public BatchPrintCheckpoint(int width, boolean reverse, int cursor, int originX, int originZ,
+                                int resumeX, int resumeZ, int verificationPass, List<Step> route, boolean restocking) {
+        this(width, reverse, cursor, originX, originZ, resumeX, resumeZ, verificationPass, route, restocking, false, 0);
+    }
+
+    public BatchPrintCheckpoint(int width, boolean reverse, int cursor, int originX, int originZ,
+                                int resumeX, int resumeZ, int verificationPass, List<Step> route, boolean restocking,
+                                boolean openingCleanup) {
+        this(width, reverse, cursor, originX, originZ, resumeX, resumeZ, verificationPass, route, restocking, openingCleanup, 0);
     }
 
     public BatchPrintCheckpoint {
         route = List.copyOf(route);
         if (width < 1 || width > 128 || route.isEmpty() || route.size() > 257 || cursor < 0 || cursor > route.size()
-            || verificationPass < 0)
+            || verificationPass < 0 || restockTripsSinceCleanup < 0)
             throw new IllegalArgumentException("蛇形断点数据无效");
         for (Step step : route) if (step.lane() < 0 || step.lane() > 127) throw new IllegalArgumentException("蛇形断点条带无效");
     }
 
     public String encode() {
-        StringBuilder text = new StringBuilder("2;").append(width).append(';').append(reverse ? 1 : 0).append(';')
+        StringBuilder text = new StringBuilder("4;").append(width).append(';').append(reverse ? 1 : 0).append(';')
             .append(cursor).append(';').append(originX).append(';').append(originZ).append(';')
             .append(resumeX).append(';').append(resumeZ).append(';').append(verificationPass).append(';');
         for (Step step : route) {
             if (text.charAt(text.length()-1) != ';') text.append('|');
             text.append(step.x()).append(',').append(step.z()).append(',').append(step.lane()).append(',').append(step.entry() ? 1 : 0);
         }
-        return text.append(';').append(restocking ? 1 : 0).toString();
+        return text.append(';').append(restocking ? 1 : 0).append(';').append(openingCleanup ? 1 : 0)
+            .append(';').append(restockTripsSinceCleanup).toString();
     }
 
     /** Keep earlier holes for final review, with a small overlap for unconfirmed clicks at the stop. */
@@ -53,7 +66,10 @@ public record BatchPrintCheckpoint(int width, boolean reverse, int cursor, int o
     public static BatchPrintCheckpoint decode(String value) {
         String[] fields = value.split(";", -1);
         boolean legacy = fields.length == 10 && fields[0].equals("1");
-        if (!legacy && !(fields.length == 11 && fields[0].equals("2"))) throw new IllegalArgumentException("蛇形断点格式无效");
+        boolean version2 = fields.length == 11 && fields[0].equals("2");
+        boolean version3 = fields.length == 12 && fields[0].equals("3");
+        boolean version4 = fields.length == 13 && fields[0].equals("4");
+        if (!legacy && !version2 && !version3 && !version4) throw new IllegalArgumentException("蛇形断点格式无效");
         List<Step> route = new ArrayList<>();
         for (String raw : fields[9].split("\\|")) {
             String[] step = raw.split(",", -1);
@@ -62,7 +78,8 @@ public record BatchPrintCheckpoint(int width, boolean reverse, int cursor, int o
         }
         return new BatchPrintCheckpoint(Integer.parseInt(fields[1]), bit(fields[2]), Integer.parseInt(fields[3]),
             Integer.parseInt(fields[4]), Integer.parseInt(fields[5]), Integer.parseInt(fields[6]), Integer.parseInt(fields[7]),
-            Integer.parseInt(fields[8]), route, !legacy && bit(fields[10]));
+            Integer.parseInt(fields[8]), route, !legacy && bit(fields[10]), (version3 || version4) && bit(fields[11]),
+            version4 ? Integer.parseInt(fields[12]) : 0);
     }
 
     private static boolean bit(String value) {

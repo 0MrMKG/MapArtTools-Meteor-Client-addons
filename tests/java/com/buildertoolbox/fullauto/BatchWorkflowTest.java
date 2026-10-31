@@ -162,12 +162,32 @@ public final class BatchWorkflowTest {
         equal(repeated,BatchPrintCheckpoint.decode(repeated.encode()),"many repair sweeps survive restart without a one-pass cap");
         var restocking=new BatchPrintCheckpoint(5,false,3,-63,-62,23,-57,37,checkpoint.route(),true);
         equal(restocking,BatchPrintCheckpoint.decode(restocking.encode()),"supply phase survives a restart instead of prematurely returning to print");
-        String legacy=checkpoint.encode().replaceFirst("2;", "1;");
+        var preparing=new BatchPrintCheckpoint(5,false,0,-63,-62,23,-57,0,checkpoint.route(),false,true);
+        equal(preparing,BatchPrintCheckpoint.decode(preparing.encode()),"opening cleanup intent survives before any stock or placement action");
+        var cleaning=new BatchPrintCheckpoint(5,false,0,-63,-62,23,-57,0,checkpoint.route(),true,true);
+        equal(cleaning,BatchPrintCheckpoint.decode(cleaning.encode()),"interrupted opening cleanup remains ahead of supply retrieval");
+        var cleaned=new BatchPrintCheckpoint(5,false,0,-63,-62,23,-57,0,checkpoint.route(),true,false);
+        check(!BatchPrintCheckpoint.decode(cleaned.encode()).openingCleanup(),"first supply-trip restart does not repeat already finished opening cleanup");
+        var periodic=new BatchPrintCheckpoint(5,false,3,-63,-62,23,-57,37,checkpoint.route(),true,false,3);
+        equal(periodic,BatchPrintCheckpoint.decode(periodic.encode()),"periodic cleanup trip count survives a supply or cleanup restart");
+        String version3=cleaning.encode().replaceFirst("4;", "3;");
+        version3=version3.substring(0,version3.lastIndexOf(';'));
+        equal(cleaning,BatchPrintCheckpoint.decode(version3),"opening cleanup checkpoints default the new trip count to zero");
+        String version2=restocking.encode().replaceFirst("4;", "2;");
+        version2=version2.substring(0,version2.lastIndexOf(';'));
+        version2=version2.substring(0,version2.lastIndexOf(';'));
+        equal(restocking,BatchPrintCheckpoint.decode(version2),"older supply checkpoints remain readable without inventing an opening cleanup");
+        String legacy=checkpoint.encode().replaceFirst("4;", "1;");
+        legacy=legacy.substring(0,legacy.lastIndexOf(';'));
+        legacy=legacy.substring(0,legacy.lastIndexOf(';'));
         legacy=legacy.substring(0,legacy.lastIndexOf(';'));
         equal(checkpoint,BatchPrintCheckpoint.decode(legacy),"older route-only checkpoints remain readable");
         boolean invalid=false;
-        try{BatchPrintCheckpoint.decode(checkpoint.encode().replace("2;5;0;3;","2;5;0;999;"));}catch(IllegalArgumentException expected){invalid=true;}
+        try{BatchPrintCheckpoint.decode(checkpoint.encode().replace("4;5;0;3;","4;5;0;999;"));}catch(IllegalArgumentException expected){invalid=true;}
         check(invalid,"corrupt cursors must not silently restart or walk arbitrary routes");
+        invalid=false;
+        try{BatchPrintCheckpoint.decode(periodic.encode().replaceFirst(";3$",";-1"));}catch(IllegalArgumentException expected){invalid=true;}
+        check(invalid,"negative cleanup trip counts must be rejected");
     }
 
     private static void inspectionChecks() {

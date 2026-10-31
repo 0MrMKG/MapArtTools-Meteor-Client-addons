@@ -472,6 +472,8 @@ public final class MapArtBatchController {
         captureDrawing();
         if(job.drawing==null)return;
         if(previous==null||previous.cursor()!=job.drawing.cursor()||!previous.route().equals(job.drawing.route())
+            ||previous.openingCleanup()!=job.drawing.openingCleanup()
+            ||previous.restockTripsSinceCleanup()!=job.drawing.restockTripsSinceCleanup()
             ||System.currentTimeMillis()-drawingSavedAt>=2000) {
             save();drawingSavedAt=System.currentTimeMillis();
         }
