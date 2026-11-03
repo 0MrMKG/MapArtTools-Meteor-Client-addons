@@ -34,7 +34,7 @@ public final class SweepStrideTest {
         check(section(source,"private void releaseMovement()","private static void setKeyPressed(").contains("sweepStride.reset()"),
             "stops, restocking and recovery discard short-step state");
         check(source.contains("horizontalSpeedSquared > 0.025 * 0.025") && source.contains("MAX_PENDING_PLACEMENTS = 3"),
-            "throughput change does not relax click stability or expand the receipt pipeline");
+            "stationary fallback retains stability checks and the receipt pipeline remains bounded");
         System.out.println("SweepStride: forward/reverse coverage, fewer stop cycles, reach margins, timeout and safety wiring passed.");
     }
 

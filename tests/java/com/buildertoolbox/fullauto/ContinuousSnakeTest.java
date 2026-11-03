@@ -37,15 +37,23 @@ public final class ContinuousSnakeTest {
             "retry known holes preserves inspected cells and never restarts a completed coverage route");
         String work=section(module,"private void tickWork()", "private void buildSnakeWaypoints()");
         check(module.contains("MAX_PENDING_PLACEMENTS = 3") && work.contains("printer.hasQueuedProjectionPlacement()")
-            && work.contains("dispatchedPlacements.size() >= MAX_PENDING_PLACEMENTS"), "bounded three-receipt pipeline still serializes actual rotation callbacks");
+            && work.contains("dispatchedPlacements.size() >= MAX_PENDING_PLACEMENTS"), "bounded three-receipt pipeline remains in place");
         String snake=section(module,"private void tickSnakeWork()", "private void tickSnakeTurn()");
         check(!module.contains("boundarySweep") && !module.contains("finishingBoundarySection"), "no periodic boundary stop/repair cursor");
         String sweepNavigation="navigateTo(sweepEndpointStand == null ? waypoint : sweepEndpointStand)";
         check(snake.contains(sweepNavigation)
             && snake.indexOf("selectReachableMatrixTarget(activeLane)") < snake.indexOf(sweepNavigation),
             "drain reachable work before walking to the endpoint or safe alternate stand");
-        check(snake.indexOf("holdForPlacementConfirmation()") < snake.indexOf(sweepNavigation),
-            "movement waits for in-flight clicks");
+        check(snake.contains("if (!streaming && holdForPlacementConfirmation()) return;")
+            && snake.contains("streaming && sweepCoverageNeedsHold(activeLane)"),
+            "straight sweeps await coverage pressure; other operations retain receipt waits");
+        String post=section(module,"private void onMovingPlacementTick(","private boolean canContinueSweepStride(");
+        check(post.contains("!canStreamBand()") && post.contains("batchLane() != lane")
+            && post.contains("dispatchedPlacements.size() >= MAX_PENDING_PLACEMENTS")
+            && post.contains("tick < nextActionTick"),"Post dispatch is phase-bound and keeps rate and pending limits");
+        check(engine.contains("PlayerMoveC2SPacket.Full") && engine.contains("PlayerMoveC2SPacket.LookAndOnGround")
+            && engine.contains("if (!validateExternalClick(plan, immutablePos, item, range)) return ExternalPlacementResult.BLOCKED;"),
+            "immediate moving clicks retain native packet ordering and hit revalidation");
         check(snake.indexOf("finishSnakeBand(activeLane)") > snake.indexOf("result == NavigationResult.ARRIVED"), "band reconciliation only at endpoint or failed navigation");
         String finish=section(module,"private boolean finishSnakeBand(int lane)","private void clearPreciseRepair()");
         check(finish.indexOf("selectReachableMatrixTarget(lane)") < finish.indexOf("for (ProjectionTarget target : targets)"), "endpoint fills reachable neighbors before requesting another repair stand");

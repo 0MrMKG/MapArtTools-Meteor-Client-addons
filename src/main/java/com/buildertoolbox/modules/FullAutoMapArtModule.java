@@ -293,6 +293,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private boolean workPlanDirty;
     private int excludedProjectionCells;
     private final Map<Item, List<BlockPos>> supplies = new HashMap<>();
+    private final com.buildertoolbox.fullauto.CarpetCorrection carpetCorrection = new com.buildertoolbox.fullauto.CarpetCorrection();
     private final Set<BlockPos> blockedTargets = new HashSet<>();
     // The authoritative completion matrix. A cell changes to true only after
     // the real world reports the exact projected state at that coordinate.
@@ -373,6 +374,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final Map<BlockPos, Long> unreachableSupplyUntil = new HashMap<>();
     private final ProducerSupplyReserve<BlockPos> producerSupplyReserve = new ProducerSupplyReserve<>();
     private long nextActionTick;
+    private int movingPlacementLane = -1;
     private int cursorSpaceAttempts, cursorSpaceCount = -1;
     private Item cursorSpaceItem;
     private ProjectionTarget cursorSpaceTarget;
@@ -623,6 +625,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     @Override
     public void onDeactivate() {
+        carpetCorrection.stop();
         autoEater.stop();
         MapArtModeGuard.end(this);
         batch.stop();
@@ -690,6 +693,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+        movingPlacementLane = -1;
         if (mc.player == null || mc.world == null) {
             disable();
             return;
@@ -711,6 +715,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             tickRegistration();
             return;
         }
+        if (carpetCorrection.target() != null && (state != TaskState.WORK
+            || (autoEat.get() && mc.player.getHungerManager().getFoodLevel() < 8))) carpetCorrection.stop();
         if (tickAutoEat()) return;
         if (batch.tick()) {
             sendStatusHeartbeat();
@@ -718,6 +724,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
 
         if (workPlanDirty && batch.printing() && !projectionLayer.isEmpty()) {
+            carpetCorrection.stop();
             applyWorkPlanUpdate();
             return;
         }
@@ -1218,9 +1225,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             return;
         }
         checkDispatchedPlacements();
-        // Serialize actual rotation callbacks, but allow a small stationary
-        // pipeline while previously clicked carpets await world updates.
-        if (printer.hasQueuedProjectionPlacement() || dispatchedPlacements.size() >= MAX_PENDING_PLACEMENTS) {
+        // Keep callback-based operations serialized. Straight carpet sweeps may
+        // continue moving while their bounded receipt pipeline is full.
+        if (printer.hasQueuedProjectionPlacement() || (dispatchedPlacements.size() >= MAX_PENDING_PLACEMENTS && !canStreamBand())) {
             releaseMovement();
             lastProgressTick = tick;
             activity = "等待刚放置的方块确认";
@@ -1245,6 +1252,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         if (serviceOverflowForCapacity()) return;
         if (serviceOpeningBands()) return;
+        if (serviceCarpetCorrection()) return;
         if (finishingLane >= 0) {
             int lane = finishingLane;
             if (!finishSnakeBand(lane)) skipSnakeLane(lane);
@@ -1389,12 +1397,20 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         ProjectionTarget nearby = activeLane == null || activeLane < 0
             ? null : selectReachableMatrixTarget(activeLane);
-        if (nearby != null && !canContinueSweepStride(activeLane)) {
+        boolean streaming = canStreamBand() && (nearby == null || nearby.state().getBlock() instanceof CarpetBlock);
+        if (streaming) movingPlacementLane = activeLane;
+        if (!streaming && nearby != null && !canContinueSweepStride(activeLane)) {
             if (tick >= nextActionTick) placeTarget(nearby);
             else releaseMovement();
             return;
         }
-        if (holdForPlacementConfirmation()) return;
+        if (!streaming && holdForPlacementConfirmation()) return;
+        if (streaming && sweepCoverageNeedsHold(activeLane)) {
+            releaseMovement();
+            lastProgressTick = tick;
+            activity = "补齐即将离开触及范围的条带格子";
+            return; // Post still places; only local coverage pressure stops movement.
+        }
         if (snakeWaypointIndex >= snakeWaypoints.size()) {
             if (!dispatchedPlacements.isEmpty()) {
                 releaseMovement();
@@ -1435,6 +1451,61 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         activity = "蛇形扫描：" + Math.min(snakeWaypointIndex + 1, snakeWaypoints.size())
             + "/" + snakeWaypoints.size() + " 路点";
+    }
+
+    /** Only the straight interior of a drawing band uses the concurrent placement path. */
+    private boolean canStreamBand() {
+        return state == TaskState.WORK && batch.printing() && !returningFromRestock
+            && finishingLane < 0 && preciseRepairTarget == null && footingRecoveryGoal == null
+            && carpetCorrection.target() == null && navigationNudge == null && tick >= navigationReleaseUntil
+            && sweepEndpointStand == null && mc.player.isOnGround()
+            && snakeWaypointIndex < snakeWaypoints.size()
+            && snakeWaypointLanes.get(snakeWaypointIndex) >= 0
+            && !snakeEntryWaypoints.contains(snakeWaypointIndex)
+            && Math.abs(mc.player.getZ() - snakeWaypoints.get(snakeWaypointIndex).getZ() - 0.5) <= 0.25;
+    }
+
+    private int sweepDirectionForLane() {
+        int end = snakeWaypointIndex;
+        int entry = end;
+        while (entry > 0 && snakeWaypointLanes.get(entry-1).equals(snakeWaypointLanes.get(end))) entry--;
+        return snakeWaypoints.get(end).getX() >= snakeWaypoints.get(entry).getX() ? 1 : -1;
+    }
+
+    private boolean sweepCoverageNeedsHold(int lane) {
+        Vec3d eye = mc.player.getEyePos();
+        int direction = sweepDirectionForLane();
+        double advance = Math.max(0.35, Math.abs(mc.player.getVelocity().x)*2 + 0.15);
+        int radius = (int)Math.ceil(placeRange.get());
+        BlockPos feet = mc.player.getBlockPos();
+        for (int x=feet.getX()-radius;x<=feet.getX()+radius;x++)
+            for (int z=feet.getZ()-radius;z<=feet.getZ()+radius;z++) {
+                Integer index=targetIndices.get(new BlockPos(x,walkY,z));
+                ProjectionTarget target=index==null?null:remainingTargets.get(index);
+                if (target==null || target.lane()!=lane || blockedTargets.contains(target.pos())
+                    || deferredResumeTargets.contains(target.pos())) continue;
+                Vec3d aim=placementAim(target);
+                if (!com.buildertoolbox.fullauto.MovingPlacementWindow.mustHold(
+                    direction*(aim.x-eye.x),aim.z-eye.z,aim.y-eye.y,placeRange.get(),advance)) continue;
+                if (isSatisfied(target)) continue;
+                if (isPlacementPending(target.pos()) || hasItem(target.state().getBlock().asItem())) return true;
+            }
+        return false;
+    }
+
+    @EventHandler
+    private void onMovingPlacementTick(TickEvent.Post event) {
+        int lane = movingPlacementLane;
+        movingPlacementLane = -1;
+        if (lane < 0 || mc.player == null || mc.world == null || !isActive() || !canStreamBand()
+            || batchLane() != lane || autoEater.eating() || tick < nextActionTick
+            || printer.hasQueuedProjectionPlacement() || dispatchedPlacements.size() >= MAX_PENDING_PLACEMENTS
+            || mc.player.currentScreenHandler != mc.player.playerScreenHandler) return;
+        // Re-read position, inventory and candidates after this tick's movement.
+        movingPlacementLane = lane;
+        ProjectionTarget target = selectReachableMatrixTarget(lane);
+        movingPlacementLane = -1;
+        if (target != null) placeTarget(target, target.state().getBlock() instanceof CarpetBlock);
     }
 
     /** Group tiny stop/start cycles into short straight steps without losing edge cells. */
@@ -1570,7 +1641,12 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
                 // Give the outer rows their in-range opportunity before they trail behind the player.
                 double distance = eye.squaredDistanceTo(Vec3d.ofCenter(candidate.pos()));
-                if (requiredLane != null && isBoundaryBand(requiredLane))
+                if (requiredLane != null && movingPlacementLane == requiredLane) {
+                    int direction = sweepDirectionForLane();
+                    Vec3d aim = placementAim(candidate);
+                    distance = com.buildertoolbox.fullauto.MovingPlacementWindow.remainingTravel(
+                        direction*(aim.x-eye.x), aim.z-eye.z, aim.y-eye.y, placeRange.get());
+                } else if (requiredLane != null && isBoundaryBand(requiredLane))
                     distance -= 32.0*Math.abs(candidate.pos().getZ()-MapArtBandGeometry.centerZ(minZ,maxZ,workingBandWidth,requiredLane));
                 if (distance < bestDistance) {
                     best = candidate;
@@ -1634,7 +1710,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         if (isSatisfied(target)) return false;
         if (!mc.world.isChunkLoaded(target.pos().getX() >> 4, target.pos().getZ() >> 4)) return true;
         BlockState actual = batch.observedBlock(target.pos());
-        return actual.isAir() || actual.isReplaceable();
+        return actual.isAir() || actual.isReplaceable() || wrongCarpet(target, actual);
     }
 
     private ProjectionTarget findStockedWindowTarget() {
@@ -1792,10 +1868,17 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             if (target.lane() != lane || deferredResumeTargets.contains(target.pos()) || isSatisfied(target)) continue;
             boolean loaded = mc.world.isChunkLoaded(target.pos().getX() >> 4, target.pos().getZ() >> 4);
             BlockState actual = loaded ? batch.observedBlock(target.pos()) : null;
-            if (loaded && !actual.isAir() && !actual.isReplaceable()) continue;
+            boolean wrongCarpet = loaded && wrongCarpet(target, actual);
+            if (loaded && !actual.isAir() && !actual.isReplaceable() && !wrongCarpet) continue;
             missing++;
-            if (!withinBandFinishArea(target.pos())) continue;
-            if (deferredBandRepairs.contains(target.pos())) continue;
+            if (!withinBandFinishArea(target.pos()) && !wrongCarpet) continue;
+            if (deferredBandRepairs.contains(target.pos())) {
+                if (wrongCarpet) {
+                    batchPauseWorker("错误地毯暂时无法纠正：" + target.pos().toShortString() + "，请检查距离或保护权限后重新开启");
+                    return true;
+                }
+                continue;
+            }
             // Consume other stocked colors before requesting a missing color.
             double candidate = distanceToPlayer(target.pos())
                 + (hasItem(target.state().getBlock().asItem()) ? 0 : 1_000_000);
@@ -1855,7 +1938,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             return true;
         }
         BlockState actual = batch.observedBlock(target.pos());
-        if ((!actual.isAir() && !actual.isReplaceable()) || !hasItem(target.state().getBlock().asItem())) {
+        if ((!actual.isAir() && !actual.isReplaceable() && !wrongCarpet(target, actual)) || !hasItem(target.state().getBlock().asItem())) {
             clearPreciseRepair(); return false;
         }
         if (blockedTargets.remove(target.pos()) && preciseRepairStand != null) rejectRepairStand();
@@ -1879,7 +1962,14 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             faceToward(preciseRepairStand); pressForward(); return true;
         }
         if (!isWithinPlaceRange(target) || playerIntersectsTarget(target)) { rejectRepairStand(); return true; }
-        placeTarget(target);
+        if (wrongCarpet(target, actual)) {
+            batch.watchPlacement(target.pos());
+            releaseMovement();
+            if (!carpetCorrection.tick(target.pos(), target.state(), actual, placeRange.get(), tick)) rejectRepairStand();
+        } else {
+            carpetCorrection.stop();
+            placeTarget(target);
+        }
         return true;
     }
 
@@ -1892,7 +1982,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         BlockPos best = null;
         double bestDistance = Double.POSITIVE_INFINITY;
         int radius = (int) Math.ceil(placeRange.get());
-        Vec3d aim = placementAim(target);
+        boolean correcting = wrongCarpet(target, batch.observedBlock(target.pos()));
+        Vec3d aim = placementAim(target).add(0, correcting ? 0.03125 : 0, 0);
         for (int x = target.pos().getX()-radius; x <= target.pos().getX()+radius; x++)
             for (int z = target.pos().getZ()-radius; z <= target.pos().getZ()+radius; z++) {
                 BlockPos candidate = new BlockPos(x, walkY, z);
@@ -1903,12 +1994,59 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 if (target.state().getBlock() instanceof CarpetBlock) {
                     var hit = mc.world.raycast(new RaycastContext(eye, aim.add(0,-0.001,0),
                         RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player));
-                    if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(target.pos().down())) continue;
+                    if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(correcting ? target.pos() : target.pos().down())) continue;
                 }
                 double distance = distanceToPlayer(candidate);
                 if (distance < bestDistance) { best = candidate; bestDistance = distance; }
             }
         return best;
+    }
+
+    private boolean wrongCarpet(ProjectionTarget target, BlockState actual) {
+        return com.buildertoolbox.fullauto.CarpetCorrection.wrong(target.state(), actual);
+    }
+
+    /** Inspect just the current strip's reachable cells; no extra full-canvas pass. */
+    private boolean serviceCarpetCorrection() {
+        if (!dispatchedPlacements.isEmpty() || printer.hasQueuedProjectionPlacement()) return false;
+        BlockPos active = carpetCorrection.target();
+        if (active != null) {
+            Integer index = targetIndices.get(active);
+            if (index == null) { carpetCorrection.stop(); return false; }
+            ProjectionTarget target = targets.get(index);
+            if (!hasItem(target.state().getBlock().asItem())) { carpetCorrection.stop(); return false; }
+            BlockState observed = batch.observedBlock(active);
+            releaseMovement();
+            if (!wrongCarpet(target, observed)) {
+                carpetCorrection.stop();
+                blockedTargets.remove(active);
+                isSatisfied(target);
+                if (observed.isAir() && mc.world.getBlockState(active).isAir()) placeTarget(target);
+                return true;
+            }
+            return carpetCorrection.tick(active, target.state(), observed, placeRange.get(), tick);
+        }
+        int lane = finishingLane >= 0 ? finishingLane : batchLane();
+        if (lane < 0 || preciseRepairTarget != null) return false;
+        int radius = (int)Math.ceil(placeRange.get());
+        BlockPos feet = mc.player.getBlockPos();
+        for (int x=feet.getX()-radius;x<=feet.getX()+radius;x++)
+            for (int z=feet.getZ()-radius;z<=feet.getZ()+radius;z++) {
+                Integer index=targetIndices.get(new BlockPos(x,walkY,z));
+                if (index==null || !mc.world.isChunkLoaded(x>>4,z>>4)) continue;
+                ProjectionTarget target=targets.get(index);
+                if (target.lane()!=lane) continue;
+                BlockState observed=batch.observedBlock(target.pos());
+                if (!wrongCarpet(target,observed)) continue;
+                if (!hasItem(target.state().getBlock().asItem())) continue;
+                batch.watchPlacement(target.pos());
+                if (carpetCorrection.tick(target.pos(),target.state(),observed,placeRange.get(),tick)) {
+                    releaseMovement();
+                    activity="条带纠错：拆除错误地毯后补放 " + target.pos().toShortString();
+                    return true;
+                }
+            }
+        return false;
     }
 
     private boolean isPlacementPending(BlockPos pos) {
@@ -1917,7 +2055,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void placeTarget(ProjectionTarget target) {
-        releaseMovement();
+        placeTarget(target, false);
+    }
+
+    private void placeTarget(ProjectionTarget target, boolean moving) {
+        if (!moving) releaseMovement();
         if (tick < nextActionTick || isPlacementPending(target.pos())) return;
         // Releasing the key is not an instantaneous stop: the player retains
         // horizontal velocity for several ticks, especially on thin carpets.
@@ -1925,8 +2067,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         // the actual position rather than the position that selected target.
         Vec3d velocity = mc.player.getVelocity();
         double horizontalSpeedSquared = velocity.x * velocity.x + velocity.z * velocity.z;
-        if (tick - lastMovementReleaseTick < 1 || horizontalSpeedSquared > 0.025 * 0.025
-            || !mc.player.isOnGround()) {
+        if (!moving && (tick - lastMovementReleaseTick < 1 || horizontalSpeedSquared > 0.025 * 0.025
+            || !mc.player.isOnGround())) {
             if (!target.pos().equals(placementStandTarget)) { placementStandTarget = target.pos(); placementStandSince = tick; }
             if (tick - placementStandSince >= 40) {
                 markPlacementBlocked(target);
@@ -1952,9 +2094,9 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
 
         batch.watchPlacement(target.pos());
-        FullAutoPlacementEngine.ExternalPlacementResult result = printer.placeProjectionBlock(
-            target.pos(), target.state(), placeRange.get(), repairVisits.getOrDefault(target.pos(), 0)
-        );
+        FullAutoPlacementEngine.ExternalPlacementResult result = moving
+            ? printer.placeMovingCarpet(target.pos(), target.state(), placeRange.get())
+            : printer.placeProjectionBlock(target.pos(), target.state(), placeRange.get(), repairVisits.getOrDefault(target.pos(), 0));
         nextActionTick = tick + 1;
         switch (result) {
             case COMPLETE -> {
@@ -3617,6 +3759,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void resetRuntime() {
+        movingPlacementLane = -1;
+        carpetCorrection.reset();
         restockBandDemand = Map.of();
         overflow.stop(); overflowRestockTarget = null; skipOverflowOnce = false; nextOverflowCheckTick = 0;
         openingCleanupPending = openingCleanupInProgress = false;
@@ -3969,6 +4113,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     @Override
     public void batchStopWorker() {
+        carpetCorrection.stop();
         overflow.stop(); overflowRestockTarget = null;
         releaseMovement();
         cancelQueuedPlacements();
@@ -4143,6 +4288,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     @Override public int batchLane() { return snakeWaypointIndex < snakeWaypointLanes.size() ? snakeWaypointLanes.get(snakeWaypointIndex) : -1; }
     @Override public boolean batchWorkerPaused() { return state == TaskState.PAUSED; }
     @Override public void batchPauseWorker(String reason) {
+        carpetCorrection.stop();
         releaseMovement(); overflow.stop(); overflowRestockTarget = null;
         state = TaskState.PAUSED; activity = reason;
     }

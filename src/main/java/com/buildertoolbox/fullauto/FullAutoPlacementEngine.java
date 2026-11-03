@@ -622,7 +622,16 @@ public final class FullAutoPlacementEngine extends Module {
         return placeProjectionBlock(pos, requiredState, range, 0, true);
     }
 
+    public ExternalPlacementResult placeMovingCarpet(BlockPos pos, BlockState requiredState, double range) {
+        if (!(requiredState.getBlock() instanceof CarpetBlock)) return ExternalPlacementResult.BLOCKED;
+        return placeProjectionBlock(pos, requiredState, range, 0, false, true);
+    }
+
     private ExternalPlacementResult placeProjectionBlock(BlockPos pos, BlockState requiredState, double range, int attempt, boolean recoverCursor) {
+        return placeProjectionBlock(pos, requiredState, range, attempt, recoverCursor, false);
+    }
+
+    private ExternalPlacementResult placeProjectionBlock(BlockPos pos, BlockState requiredState, double range, int attempt, boolean recoverCursor, boolean moving) {
         if (mc.player == null || mc.world == null || requiredState == null || requiredState.isAir()) {
             return ExternalPlacementResult.BLOCKED;
         }
@@ -652,6 +661,22 @@ public final class FullAutoPlacementEngine extends Module {
         cancelledPlacements.remove(pos);
         PlacementRotation rotation = getXiaohePlacementRotation(plan, requiredState);
         BlockPos immutablePos = pos.toImmutable();
+        if (moving) {
+            // Called after movement, using a fresh hit plan and the current real position.
+            // Vanilla interactBlock supplies the 1.21.11 interaction sequence number.
+            if (!validateExternalClick(plan, immutablePos, item, range)) return ExternalPlacementResult.BLOCKED;
+            float yaw = mc.player.getYaw(), pitch = mc.player.getPitch();
+            mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Full(
+                mc.player.getX(), mc.player.getY(), mc.player.getZ(), (float)rotation.yaw(), (float)rotation.pitch(),
+                mc.player.isOnGround(), mc.player.horizontalCollision));
+            try {
+                interactWithSupportSneak(plan, immutablePos, item, true, recoverCursor);
+            } finally {
+                mc.player.networkHandler.sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.LookAndOnGround(
+                    yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
+            }
+            return ExternalPlacementResult.DISPATCHED;
+        }
         Object token = new Object();
         queuedProjectionPlacements.put(immutablePos, token);
         Rotations.rotate(rotation.yaw(), rotation.pitch(), ROTATION_PRIORITY, () -> {
