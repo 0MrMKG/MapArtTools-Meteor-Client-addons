@@ -413,6 +413,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final WalkingProgress walkingProgress = new WalkingProgress();
     private long lastMovementReleaseTick = -100;
     private final SweepStride sweepStride = new SweepStride();
+    private boolean sweepCollecting;
     private double lastPathDistance = Double.POSITIVE_INFINITY;
     private boolean updatingSupplyList;
     private boolean backgroundPauseOverridden;
@@ -1252,6 +1253,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void buildSnakeWaypoints() {
+        sweepCollecting = false;
         deferredResumeTargets.clear();
         resumeSupplyPending = returningToCheckpoint = false;
         supplyWindowLanes.clear();
@@ -1387,7 +1389,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         ProjectionTarget nearby = activeLane == null || activeLane < 0
             ? null : selectReachableMatrixTarget(activeLane);
-        if (nearby != null && !canContinueSweepStride(activeLane)) {
+        if (nearby == null) sweepCollecting = false;
+        if (nearby != null && (sweepCollecting || !canContinueSweepStride(activeLane))) {
+            // Finish this stop before starting another stride. Repeatedly
+            // priming navigation here would keep resetting click stability.
+            sweepCollecting = true;
             if (tick >= nextActionTick) placeTarget(nearby);
             else releaseMovement();
             return;
@@ -1437,22 +1443,31 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     /** Group tiny stop/start cycles into short straight steps without losing edge cells. */
     private boolean canContinueSweepStride(Integer lane) {
-        if (lane == null || lane < 0 || sweepEndpointStand != null || !ownsForwardKey || !mc.player.isOnGround()
+        if (lane == null || lane < 0 || sweepEndpointStand != null || !mc.player.isOnGround()
             || !dispatchedPlacements.isEmpty() || printer.hasQueuedProjectionPlacement()
-            || snakeWaypointIndex >= snakeWaypoints.size() || pathIndex >= path.size()) return false;
-        double remaining = sweepStride.remaining(mc.player.getX(), mc.player.getZ(), tick);
-        if (remaining <= 0) return false;
+            || snakeWaypointIndex >= snakeWaypoints.size()) return false;
         BlockPos goal = snakeWaypoints.get(snakeWaypointIndex);
-        BlockPos next = path.get(pathIndex);
         // Only optimize straight centerline travel. Turns, obstacle detours,
         // recovery nudges and endpoints retain the existing stop/place flow.
         double dx = goal.getX() + 0.5 - mc.player.getX();
-        if (Math.abs(dx) <= remaining + 0.4 || Math.abs(mc.player.getZ() - goal.getZ() - 0.5) > 0.2
-            || next.getZ() != goal.getZ() || (next.getX()+0.5-mc.player.getX()) * dx <= 0
+        if (Math.abs(dx) <= 0.4 || Math.abs(mc.player.getZ() - goal.getZ() - 0.5) > 0.2) return false;
+        // At a band entry the previous turn has released movement. Start the
+        // same normal navigation before deciding whether a larger stop fits.
+        if (!ownsForwardKey || pathIndex >= path.size()) {
+            if (navigateTo(goal) != NavigationResult.MOVING || !ownsForwardKey) return false;
+            sweepStride.begin(mc.player.getX(), mc.player.getZ(), tick);
+        }
+        double remaining = sweepStride.remaining(mc.player.getX(), mc.player.getZ(), tick);
+        if (remaining <= 0 || pathIndex >= path.size()) return false;
+        BlockPos next = path.get(pathIndex);
+        if (next.getZ() != goal.getZ() || (next.getX()+0.5-mc.player.getX()) * dx <= 0
             || !canWalkDirectlyTo(next)) return false;
         Vec3d eye = mc.player.getEyePos();
-        // Include a braking margin and possible centerline correction.
-        Vec3d futureEye = new Vec3d(eye.x + Math.copySign(remaining + 0.2, dx), eye.y, goal.getZ()+0.5);
+        // Test the next movement plus braking distance, not the entire stride.
+        // A cell may stop a longer stride early without cancelling all safe
+        // progress toward the stand that covers both front and rear rows.
+        double advance = Math.min(remaining, Math.max(0.1, Math.abs(mc.player.getVelocity().x) * 2)) + 0.3;
+        Vec3d futureEye = new Vec3d(eye.x + Math.copySign(advance, dx), eye.y, goal.getZ()+0.5);
         int radius = (int) Math.ceil(placeRange.get());
         BlockPos feet = mc.player.getBlockPos();
         for (int x=feet.getX()-radius; x<=feet.getX()+radius; x++) {
@@ -1514,6 +1529,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void skipSnakeLane(int lane) {
+        sweepCollecting = false;
         resetNavigation();
         boundaryEntryStand=null;
         sweepEndpointStand=null;
@@ -3615,6 +3631,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private void resetRuntime() {
+        sweepCollecting = false;
         restockBandDemand = Map.of();
         overflow.stop(); overflowRestockTarget = null; skipOverflowOnce = false; nextOverflowCheckTick = 0;
         openingCleanupPending = openingCleanupInProgress = false;
