@@ -2,7 +2,7 @@ package com.buildertoolbox.fullauto;
 
 /** A short sweep movement window, never a timer that forces walking past work. */
 public final class SweepStride {
-    public static final double LENGTH = 0.8;
+    public static final double LENGTH = 2.0;
     private static final long MAX_TICKS = 16;
     private double originX, originZ;
     private long startedAt;
