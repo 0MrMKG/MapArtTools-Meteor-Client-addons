@@ -3,10 +3,12 @@ package com.buildertoolbox.fullauto;
 import java.util.function.IntPredicate;
 import java.util.function.IntUnaryOperator;
 
-/** A short sweep movement window, never a timer that forces walking past work. */
+/** Reach-limited sweep travel with a bounded fallback for stalled movement. */
 public final class SweepStride {
-    public static final double LENGTH = 2.0;
-    private static final long MAX_TICKS = 16;
+    // Allow a complete hand-range diameter between drained stops. The worker's
+    // per-cell reach guard, not a two-block step, chooses the actual stop.
+    public static final double LENGTH = 8.0;
+    private static final long MAX_TICKS = 60;
     private double originX, originZ;
     private long startedAt;
     private boolean active;
