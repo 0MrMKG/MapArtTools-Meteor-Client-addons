@@ -114,7 +114,7 @@ public final class LitematicaMapArtModule extends Module {
     private final SettingGroup sgNavigation = settings.createGroup("Navigation");
     private final Setting<Boolean> autoEat = sgGeneral.add(new BoolSetting.Builder()
         .name("Auto Eat")
-        .description("Below 4 hunger icons (8 points), eat food from the full inventory until hunger is full, then resume. Does not sort inventory.")
+        .description("饱食度低于四格（8 点）时，从背包中自动进食，吃满后继续工作。")
         .defaultValue(true).build());
     private final MapArtAutoEat autoEater = new MapArtAutoEat(mc, message -> warning("%s", message));
     private final CursorRecovery cursorRecovery = new CursorRecovery(mc);
@@ -126,7 +126,7 @@ public final class LitematicaMapArtModule extends Module {
     // instead of exposing a raw editable list of color IDs.
     private final Setting<Boolean> colorFilterEnabled = sgGeneral.add(new BoolSetting.Builder()
         .name("Color Filter Enabled")
-        .description("Enable the color exclusion table below. Checked colors are not placed or restocked.")
+        .description("启用下方颜色筛选表。勾选的颜色会跳过铺设和补货。")
         .defaultValue(false)
         .visible(() -> false)
         .onChanged(value -> queueWorkPlanUpdate())
@@ -135,7 +135,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<List<String>> excludedColors = sgGeneral.add(new StringListSetting.Builder()
         .name("Excluded Colors")
-        .description("Saved dye color IDs selected in the color exclusion table.")
+        .description("保存颜色筛选表中勾选的颜色。")
         .defaultValue(new String[0])
         .visible(() -> false)
         .onChanged(value -> { if (colorFilterEnabled.get()) queueWorkPlanUpdate(); })
@@ -144,7 +144,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Boolean> registerSupply = sgSupply.add(new BoolSetting.Builder()
         .name("Select Supply Chests")
-        .description("Hides the settings screen: right-click a labeled container to add it, press Esc to return here.")
+        .description("进入选择模式后隐藏设置，右键点击带物品标签的容器进行登记，按 Esc 返回。")
         .defaultValue(false)
         .onChanged(this::onRegisterSupplyChanged)
         .build()
@@ -152,7 +152,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<List<String>> registeredSupplies = sgSupply.add(new StringListSetting.Builder()
         .name("Supply Chest List")
-        .description("Item ID -> X,Y,Z. This list is saved and can be edited before re-registering containers.")
+        .description("按“物品 ID → X,Y,Z 坐标”保存补给箱，可手动编辑列表或重新登记。")
         .defaultValue(new String[0])
         .onChanged(this::restoreSupplyList)
         .build()
@@ -160,14 +160,14 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Boolean> autoBandWidth = sgGeneral.add(new BoolSetting.Builder()
         .name("Auto Band Width")
-        .description("Use the widest band safely reachable from its middle, including the row just walked past.")
+        .description("根据放置距离选择从中线能安全覆盖的最大条带宽度，包含刚走过的一行。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Integer> laneWidth = sgGeneral.add(new IntSetting.Builder()
         .name("Scan Band Width")
-        .description("Manual band width when Auto Band Width is off; still limited by safe reach.")
+        .description("关闭自动条带宽度后使用此值，实际宽度仍受安全放置距离限制。")
         .defaultValue(4)
         .range(1, 16)
         .sliderRange(1, 8)
@@ -176,7 +176,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Boolean> reverseSnake = sgGeneral.add(new BoolSetting.Builder()
         .name("Reverse Snake")
-        .description("Start at the other end of the normal snake route and traverse it backwards. For two players starting on the same side, enable this for one player. Restocking follows the selected direction.")
+        .description("从正常路线的另一端反向蛇形铺设。两人协作时可让其中一人开启，补货按所选方向计算。")
         .defaultValue(false)
         .onChanged(value -> queueWorkPlanUpdate())
         .build()
@@ -184,7 +184,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Double> placeRange = sgGeneral.add(new DoubleSetting.Builder()
         .name("Place Range")
-        .description("Maximum interaction range for map-art targets.")
+        .description("铺设地图画时允许的最大交互距离，单位为格。")
         .defaultValue(3.6)
         .range(2.0, 3.6)
         .sliderRange(2.0, 3.6)
@@ -193,7 +193,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Integer> placementSpeed = sgGeneral.add(new IntSetting.Builder()
         .name("Placement Speed")
-        .description("Maximum placement attempts per second while stationary. Up to three placements may await confirmation; walking waits for all of them.")
+        .description("站稳后每秒最多尝试放置的次数。最多同时等待三次放置确认，确认完成后继续行走。")
         .defaultValue(20)
         .range(1, 20)
         .sliderRange(1, 20)
@@ -202,14 +202,14 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Boolean> statusMessages = sgGeneral.add(new BoolSetting.Builder()
         .name("Status Messages")
-        .description("Shows a chat progress message every 10 seconds and whenever the worker stops.")
+        .description("每十秒及任务停止时，在聊天栏显示进度。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Integer> routeRetries = sgNavigation.add(new IntSetting.Builder()
         .name("Route Retries")
-        .description("Replans before a target or supply chest is treated as unreachable.")
+        .description("判定目标或补给箱不可达前，允许重新规划路线的次数。")
         .defaultValue(2)
         .range(0, 6)
         .sliderRange(0, 4)
@@ -218,7 +218,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Integer> walkPace = sgNavigation.add(new IntSetting.Builder()
         .name("Walk Speed (%)")
-        .description("Percentage of normal walking time used while following a route. Does not control placement speed.")
+        .description("按正常行走时间的百分比控制路线行走速度。放置速度由单独选项控制。")
         .defaultValue(100)
         .range(25, 100)
         .sliderRange(25, 100)
@@ -227,7 +227,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Integer> pathSearchLimit = sgNavigation.add(new IntSetting.Builder()
         .name("Path Search Limit")
-        .description("Maximum real standable cells examined per route.")
+        .description("每次寻路最多检查的真实可站立格子数量。")
         .defaultValue(20000)
         .range(1024, 100000)
         .sliderRange(4096, 50000)
@@ -236,7 +236,7 @@ public final class LitematicaMapArtModule extends Module {
 
     private final Setting<Integer> stuckTimeout = sgNavigation.add(new IntSetting.Builder()
         .name("Stuck Timeout")
-        .description("Ticks without getting closer before the route is replanned.")
+        .description("连续多少游戏刻未接近目标时重新寻路。通常每秒二十游戏刻。")
         .defaultValue(80)
         .range(20, 300)
         .sliderRange(40, 160)
@@ -343,27 +343,27 @@ public final class LitematicaMapArtModule extends Module {
     private String activity = "空闲";
 
     public LitematicaMapArtModule() {
-        super(BuilderToolboxAddon.CATEGORY, "Map Art Maker", "Builds the current Litematica layer in serpentine bands and restocks from labeled containers using its own internal placement engine.");
+        super(BuilderToolboxAddon.CATEGORY, "Map Art Maker", "按蛇形条带铺设当前 Litematica 投影层，并从已登记的材料箱自动补货。");
     }
 
     @Override
     public WWidget getWidget(GuiTheme theme) {
-        WSection section = theme.section("Color Filter - checked colors are skipped", true);
+        WSection section = theme.section("颜色筛选（勾选后跳过该颜色）", true);
         WHorizontalList controls = section.add(theme.horizontalList()).expandX().widget();
-        controls.add(theme.label("Enable Color Filter"));
+        controls.add(theme.label("启用颜色筛选"));
         WCheckbox enabled = controls.add(theme.checkbox(colorFilterEnabled.get())).widget();
         WLabel status = section.add(theme.label(colorFilterStatus())).widget();
         enabled.action = () -> {
             colorFilterEnabled.set(enabled.checked);
             status.set(colorFilterStatus());
         };
-        enabled.tooltip = "Off by default. Color selections are saved even when filtering is disabled.";
+        enabled.tooltip = "默认关闭。关闭筛选后，勾选记录仍会保存。";
         WTable table = section.add(theme.table()).expandX().widget();
         table.horizontalSpacing = 12;
         for (int panel = 0; panel < 2; panel++) {
-            table.add(theme.label("Swatch"));
-            table.add(theme.label("Color"));
-            table.add(theme.label("Skip"));
+            table.add(theme.label("色块"));
+            table.add(theme.label("颜色"));
+            table.add(theme.label("跳过"));
         }
         table.row();
         DyeColor[] colors = DyeColor.values();
@@ -374,12 +374,10 @@ public final class LitematicaMapArtModule extends Module {
                 ColorSwatch swatch = new ColorSwatch(color);
                 swatch.theme = theme;
                 table.add(swatch);
-                String label = java.util.Arrays.stream(id.split("_"))
-                    .map(word -> Character.toUpperCase(word.charAt(0)) + word.substring(1))
-                    .collect(java.util.stream.Collectors.joining(" "));
+                String label = com.buildertoolbox.utils.ChineseSettings.colorTitle(id);
                 table.add(theme.label(label));
                 WCheckbox skip = table.add(theme.checkbox(excludedColors.get().contains(id))).widget();
-                skip.tooltip = "Checked = skip " + label + " dyed blocks; does not remove existing blocks.";
+                skip.tooltip = "勾选后跳过" + label + "染色方块，已放置的方块会保留。";
                 skip.action = () -> {
                     List<String> selected = new ArrayList<>(excludedColors.get());
                     selected.removeIf(id::equals);
@@ -390,13 +388,13 @@ public final class LitematicaMapArtModule extends Module {
             }
             table.row();
         }
-        section.add(theme.label("Applies to dyed blocks, not all blocks with a similar map color."));
+        section.add(theme.label("按染色方块的颜色筛选，地图颜色相近的其它方块不在筛选范围内。"));
         return section;
     }
 
     private String colorFilterStatus() {
-        return colorFilterEnabled.get() ? "Enabled: " + excludedColors.get().size() + " color(s) excluded"
-            : "Disabled: all colors will be printed (selections saved)";
+        return colorFilterEnabled.get() ? "已启用，排除 " + excludedColors.get().size() + " 种颜色"
+            : "未启用，铺设全部颜色（已保存勾选记录）";
     }
 
     private void queueWorkPlanUpdate() {

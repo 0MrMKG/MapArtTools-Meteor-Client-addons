@@ -2,7 +2,7 @@
   "required": true,
   "package": "com.buildertoolbox.mixin",
   "compatibilityLevel": "JAVA_21",
-  "client": ["ScreenMixin", "ModulesMixin"],
+  "client": ["ScreenMixin", "ModulesMixin", "SettingsGroupMixin", "ModuleScreenMixin", "StringListSettingMixin", "MeteorGuiThemeMixin"],
   "injectors": {
     "defaultRequire": 1
   }

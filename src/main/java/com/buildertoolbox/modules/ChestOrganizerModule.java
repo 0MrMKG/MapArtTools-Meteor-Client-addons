@@ -71,23 +71,23 @@ public final class ChestOrganizerModule extends Module {
     private final SettingGroup sgStorage = settings.createGroup("Storage");
     private final Setting<Boolean> selectChests = sgStorage.add(new BoolSetting.Builder()
         .name("Select Storage Chests")
-        .description("Hide settings, right-click labeled chests to add them, then press Esc to return.")
+        .description("隐藏设置后右键登记带物品标签的箱子，按 Esc 返回。")
         .defaultValue(false).onChanged(this::onSelectChestsChanged).build());
     private final Setting<List<String>> chestList = sgStorage.add(new StringListSetting.Builder()
         .name("Storage Chest List")
-        .description("Registered item ID -> chest position. Use + to edit entries manually; labels are checked before transfer.")
+        .description("保存“物品 ID → 箱子坐标”，可用加号手动添加条目。搬运前会核对标签。")
         .defaultValue(new String[0]).onChanged(this::restoreChestList).build());
     private final Setting<Boolean> selectOverflow = sgStorage.add(new BoolSetting.Builder()
         .name("Select Overflow Chest")
-        .description("Right-click one unlabeled chest for miscellaneous items; press Esc to return.")
+        .description("右键选择一个无标签的杂物箱，按 Esc 返回。")
         .defaultValue(false).onChanged(this::onSelectOverflowChanged).build());
     private final Setting<List<String>> overflowChestList = sgStorage.add(new StringListSetting.Builder()
         .name("Overflow Chest")
-        .description("Optional single X,Y,Z position. Used only when no labeled destination can receive an item.")
+        .description("可选的单个杂物箱坐标。没有可接收该物品的分类箱时使用。")
         .defaultValue(new String[0]).onChanged(this::restoreOverflowChest).build());
     private final Setting<Boolean> resumeSorting = sgStorage.add(new BoolSetting.Builder()
         .name("Resume Sorting")
-        .description("Retry after adding a chest, freeing space, or correcting a label.")
+        .description("添加箱子、腾出空间或修正标签后，点击继续整理。")
         .defaultValue(false).onChanged(this::onResumeSortingChanged).build());
 
     private final Map<BlockPos, Item> labels = new HashMap<>();
@@ -138,7 +138,7 @@ public final class ChestOrganizerModule extends Module {
 
     public ChestOrganizerModule() {
         super(BuilderToolboxAddon.CATEGORY, "Chest Organizer",
-            "Sorts misplaced stacks between registered item-frame-labeled chests without touching unrelated inventory items.");
+            "根据登记箱子的物品展示框标签，将错放物品取出并归类到对应箱子。");
     }
 
     @Override
