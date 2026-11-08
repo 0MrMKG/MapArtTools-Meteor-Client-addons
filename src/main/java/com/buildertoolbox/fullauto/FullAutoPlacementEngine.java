@@ -755,6 +755,9 @@ public final class FullAutoPlacementEngine extends Module {
 
     /** Search only the actual main-hand hotbar; Meteor may otherwise prefer an offhand match. */
     private FindItemResult findHotbarItem(Item item) {
+        int selected = mc.player.getInventory().getSelectedSlot();
+        var held = mc.player.getInventory().getStack(selected);
+        if (held.isOf(item)) return new FindItemResult(selected, held.getCount());
         for (int slot = 0; slot < 9; slot++) {
             var stack = mc.player.getInventory().getStack(slot);
             if (stack.isOf(item)) return new FindItemResult(slot, stack.getCount());

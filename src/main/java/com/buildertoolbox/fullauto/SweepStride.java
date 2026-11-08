@@ -1,5 +1,8 @@
 package com.buildertoolbox.fullauto;
 
+import java.util.function.IntPredicate;
+import java.util.function.IntUnaryOperator;
+
 /** A short sweep movement window, never a timer that forces walking past work. */
 public final class SweepStride {
     public static final double LENGTH = 2.0;
@@ -25,4 +28,23 @@ public final class SweepStride {
     }
 
     public void reset() { active = false; }
+
+    /** Skip intermediate centers only along an unbroken, walkable straight path. */
+    public static int lookahead(double x, double z, int goalX, int goalZ, int start, int size,
+                                IntUnaryOperator pathX, IntUnaryOperator pathZ, IntPredicate walkable) {
+        if (start >= size || Math.abs(z - goalZ - 0.5) > 0.2) return start;
+        double direction = Math.signum(goalX + 0.5 - x);
+        int best = start;
+        for (int i = start; i < Math.min(size, start + 8); i++) {
+            int px = pathX.applyAsInt(i);
+            if (pathZ.applyAsInt(i) != goalZ) break;
+            if (i > start && (px - pathX.applyAsInt(i - 1)) * direction <= 0) break;
+            double ahead = (px + 0.5 - x) * direction;
+            if (ahead > 4 || ahead < -0.6) break;
+            if (ahead <= 0) continue;
+            if (!walkable.test(i)) break;
+            best = i;
+        }
+        return best;
+    }
 }
