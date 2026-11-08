@@ -12,9 +12,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public abstract class MeteorGuiThemeMixin {
     @Inject(method = "textRenderer", at = @At("HEAD"), cancellable = true)
     private void builderToolbox$unicodeFont(CallbackInfoReturnable<TextRenderer> cir) {
-        // GuiRenderer begins/ends one renderer for the entire scissored batch.
-        // Use that same Unicode renderer for both layout and every text draw,
-        // including nested settings, tooltips and input fields.
+        // Scale glyph vertices before Minecraft prepares/culls them. Applying
+        // scale only at the final GPU flush leaves glyphs in unscaled screen
+        // coordinates during clipping, dropping prefixes in nested panels.
+        VanillaTextRenderer.INSTANCE.scaleIndividually = true;
         cir.setReturnValue(VanillaTextRenderer.INSTANCE);
     }
 }
