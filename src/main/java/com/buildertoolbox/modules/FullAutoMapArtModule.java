@@ -1459,6 +1459,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         }
         double remaining = sweepStride.remaining(mc.player.getX(), mc.player.getZ(), tick);
         if (remaining <= 0 || pathIndex >= path.size()) return false;
+        advanceStraightSweepPath(goal);
         BlockPos next = path.get(pathIndex);
         if (next.getZ() != goal.getZ() || (next.getX()+0.5-mc.player.getX()) * dx <= 0
             || !canWalkDirectlyTo(next)) return false;
@@ -1545,6 +1546,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private ProjectionTarget selectReachableMatrixTarget(Integer requiredLane) {
         ProjectionTarget best = null;
         double bestDistance = Double.POSITIVE_INFINITY;
+        int bestSwitchCost = Integer.MAX_VALUE;
+        Item heldItem = mc.player.getMainHandStack().getItem();
+        Set<Item> hotbarItems = new HashSet<>();
+        for (int slot = 0; slot < 9; slot++) hotbarItems.add(mc.player.getInventory().getStack(slot).getItem());
         double rangeSquared = placeRange.get() * placeRange.get();
         Vec3d eye = mc.player.getEyePos();
         // Look up only coordinates near the player, not the whole blueprint.
@@ -1586,9 +1591,14 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 double distance = eye.squaredDistanceTo(Vec3d.ofCenter(candidate.pos()));
                 if (requiredLane != null && isBoundaryBand(requiredLane))
                     distance -= 32.0*Math.abs(candidate.pos().getZ()-MapArtBandGeometry.centerZ(minZ,maxZ,workingBandWidth,requiredLane));
-                if (distance < bestDistance) {
+                // Drain one material at this stationary stop before paying for
+                // another hotbar/inventory swap. All candidates are already
+                // reachable, and movement remains blocked until they drain.
+                int switchCost = item == heldItem ? 0 : hotbarItems.contains(item) ? 1 : 2;
+                if (switchCost < bestSwitchCost || switchCost == bestSwitchCost && distance < bestDistance) {
                     best = candidate;
                     bestDistance = distance;
+                    bestSwitchCost = switchCost;
                 }
             }
         }
@@ -3321,6 +3331,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 if (!planPath(goal)) { releaseMovement(); return NavigationResult.UNREACHABLE; }
             }
         }
+        advanceStraightSweepPath(goal);
         while (pathIndex < path.size() && hasReachedPathStep(path.get(pathIndex))) {
             pathIndex++;
             lastProgressTick = tick;
@@ -3358,6 +3369,20 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         faceToward(next);
         pressForward(shouldSprintToSupply(next));
         return NavigationResult.MOVING;
+    }
+
+    private void advanceStraightSweepPath(BlockPos goal) {
+        if (state != TaskState.WORK || returningFromRestock || finishingLane >= 0
+            || footingRecoveryGoal != null || navigationNudge != null || sweepEndpointStand != null
+            || snakeEntryWaypoints.contains(snakeWaypointIndex) || snakeWaypointIndex >= snakeWaypoints.size()
+            || !goal.equals(snakeWaypoints.get(snakeWaypointIndex))) return;
+        int next = SweepStride.lookahead(mc.player.getX(), mc.player.getZ(), goal.getX(), goal.getZ(),
+            pathIndex, path.size(), i -> path.get(i).getX(), i -> path.get(i).getZ(),
+            i -> path.get(i).getY() == goal.getY() && isStandUsable(path.get(i)) && canWalkDirectlyTo(path.get(i)));
+        if (next > pathIndex) {
+            pathIndex = next;
+            lastPathDistance = Double.POSITIVE_INFINITY;
+        }
     }
 
     private boolean shouldSprintToSupply(BlockPos next) {
