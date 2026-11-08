@@ -1441,7 +1441,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             + "/" + snakeWaypoints.size() + " 路点";
     }
 
-    /** Group tiny stop/start cycles into short straight steps without losing edge cells. */
+    /** Continue straight travel until unfinished cells approach the rear reach limit. */
     private boolean canContinueSweepStride(Integer lane) {
         if (lane == null || lane < 0 || sweepEndpointStand != null || !mc.player.isOnGround()
             || !dispatchedPlacements.isEmpty() || printer.hasQueuedProjectionPlacement()
