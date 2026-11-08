@@ -24,14 +24,20 @@ public final class BuilderToolboxAddon extends MeteorAddon {
     public void onInitialize() {
         LOG.info("Initializing Builder Toolbox");
         LitematicaMapArtModule once = new LitematicaMapArtModule();
-        setMenuTitle(once, "Map Art Maker（Once）");
+        setMenuTitle(once, "Map Art Maker（Once） [单次地图画制作]");
         Modules.get().add(once);
         FullAutoMapArtModule fullAuto = new FullAutoMapArtModule();
-        setMenuTitle(fullAuto, "Map Art Maker（Full Mode）");
+        setMenuTitle(fullAuto, "Map Art Maker（Full Mode） [全自动地图画制作]");
         Modules.get().add(fullAuto);
-        Modules.get().add(new UnderfootScaffoldModule());
-        Modules.get().add(new ChestOrganizerModule());
-        Modules.get().add(new AutoCraftModule());
+        UnderfootScaffoldModule scaffold = new UnderfootScaffoldModule();
+        setMenuTitle(scaffold, "Underfoot Scaffold [脚下搭路]");
+        Modules.get().add(scaffold);
+        ChestOrganizerModule organizer = new ChestOrganizerModule();
+        setMenuTitle(organizer, "Chest Organizer [箱子整理]");
+        Modules.get().add(organizer);
+        AutoCraftModule craft = new AutoCraftModule();
+        setMenuTitle(craft, "Auto Craft [自动合成]");
+        Modules.get().add(craft);
         applyMenuOrder(Modules.get());
         MapArtModeGuard.install();
     }
