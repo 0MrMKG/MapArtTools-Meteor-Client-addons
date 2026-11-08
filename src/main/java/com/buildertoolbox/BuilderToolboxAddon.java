@@ -52,6 +52,7 @@ public final class BuilderToolboxAddon extends MeteorAddon {
     }
 
     private static void setMenuTitle(Module module, String title) {
+        com.buildertoolbox.utils.ChineseSettings.apply(module);
         // Meteor persists modules by `name`, not `title`. Keep the old name
         // (and its saved settings/keybinds) while changing only the UI label.
         try {

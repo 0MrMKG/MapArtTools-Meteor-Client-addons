@@ -131,39 +131,39 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private final SettingGroup sgNavigation = settings.createGroup("Navigation");
     private final Setting<Boolean> autoEat = sgGeneral.add(new BoolSetting.Builder()
         .name("Auto Eat")
-        .description("Below 4 hunger icons (8 points), eat food from the full inventory until hunger is full, then resume. Does not sort inventory.")
+        .description("饱食度低于四格（8 点）时，从背包中自动进食，吃满后继续工作。")
         .defaultValue(true).build());
     private final MapArtAutoEat autoEater = new MapArtAutoEat(mc, message -> warning("%s", message));
     private final SettingGroup sgBatch = settings.createGroup("Full Auto Batch");
     private final Setting<String> batchFolder = sgBatch.add(new StringSetting.Builder()
-        .name("Schematic Folder").description("Relative to Litematica's schematics folder; Chinese names and Ctrl+V supported. Validate / Reinitialize scans the directory and resets the batch even when the files are unchanged.").defaultValue("").build());
+        .name("Schematic Folder").description("填写相对于 Litematica 蓝图目录的文件夹名称，支持中文和粘贴。点击“验证并重新初始化”会扫描目录并重置批次，即使文件未改变也会重置。").defaultValue("").build());
     private final Setting<Integer> allowedMissingBlocks = sgBatch.add(new IntSetting.Builder()
         .name("Allowed Missing Blocks")
-        .description("Finish repair sweeps only when missing blocks are at or below this limit. 0 requires every non-excluded target to be placed. Wrong occupied blocks do not count; unread areas must still be checked. Can be changed without resetting the batch.")
+        .description("漏放格数不超过此值时完成补铺。设为 0 表示所有未排除的位置都必须铺好。错放不计入漏放，未读取区域仍需检查。可直接调整，无须重建批次。")
         .defaultValue(0).range(0, 16384).sliderRange(0, 100).build());
-    private final Setting<String> canvasOrigin = batchPosition("Canvas Origin", "Litematica origin: clicked block X,Y+1,Z. The file must be a single 128x128 layer at relative Y=0.");
+    private final Setting<String> canvasOrigin = batchPosition("Canvas Origin", "右键方块的 X、Y+1、Z 作为画布原点。蓝图须为相对高度 Y=0 的单层 128×128 地图画。");
     private final Setting<Boolean> selectCanvas = batchSelector("Set Canvas Origin", BatchLocation.CANVAS);
-    private final Setting<String> clearLever = batchPosition("Clear Lever", "Lever block used for the two dispenser triggers.");
+    private final Setting<String> clearLever = batchPosition("Clear Lever", "用于两次触发出水和收水的拉杆坐标。");
     private final Setting<Boolean> selectLever = batchSelector("Set Clear Lever", BatchLocation.LEVER);
-    private final Setting<String> mapSupply = batchPosition("Map Supply", "Container holding empty maps and ordinary glass panes. No label required.");
+    private final Setting<String> mapSupply = batchPosition("Map Supply", "存放空地图和普通玻璃板的容器位置，无须物品标签。");
     private final Setting<Boolean> selectMaps = batchSelector("Set Map Supply", BatchLocation.MAPS);
-    private final Setting<String> cartographyTable = batchPosition("Cartography Table", "Cartography table block position.");
+    private final Setting<String> cartographyTable = batchPosition("Cartography Table", "锁定地图所用制图台的坐标。");
     private final Setting<Boolean> selectCartography = batchSelector("Set Cartography Table", BatchLocation.TABLE);
-    private final Setting<String> productStorage = batchPosition("Product Storage", "Container for this batch's locked maps. No label required.");
+    private final Setting<String> productStorage = batchPosition("Product Storage", "存放本批次锁定地图的容器位置，无须物品标签。");
     private final Setting<Boolean> selectProduct = batchSelector("Set Product Storage", BatchLocation.PRODUCT);
     private final Setting<Integer> resetStartMap = sgBatch.add(new IntSetting.Builder()
         .name("Reset Start Map")
-        .description("1-based position in the naturally sorted folder, inclusive. Used only by Reset Batch / Validate; changing it does not move an existing batch. The selected picture will be cleared and rebuilt on start.")
+        .description("按文件名自然排序后，从此序号开始重建，包含这一张，序号从 1 开始。仅在重建批次或验证目录时生效，启动后会先清理并重新绘制所选地图。")
         .defaultValue(1).range(1, 100000).sliderRange(1, 100).build());
     private final Setting<Boolean> resetBatch = sgBatch.add(new BoolSetting.Builder()
-        .name("Reset Batch").description("Validate the folder and rebuild from Reset Start Map (inclusive). Archives the old checkpoint; no lever action until enabled again.")
+        .name("Reset Batch").description("验证目录，并从“重建起始地图序号”开始建立新批次。旧断点会归档，重新开启功能后才操作拉杆。")
         .defaultValue(false).onChanged(this::onBatchReset).build());
 
     // Persist through Meteor profiles, but present these in the color table
     // instead of exposing a raw editable list of color IDs.
     private final Setting<Boolean> colorFilterEnabled = sgGeneral.add(new BoolSetting.Builder()
         .name("Color Filter Enabled")
-        .description("Enable the color exclusion table below. Checked colors are not placed or restocked.")
+        .description("启用下方颜色筛选表。勾选的颜色会跳过铺设和补货。")
         .defaultValue(false)
         .visible(() -> false)
         .onChanged(value -> queueWorkPlanUpdate())
@@ -172,7 +172,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<List<String>> excludedColors = sgGeneral.add(new StringListSetting.Builder()
         .name("Excluded Colors")
-        .description("Saved dye color IDs selected in the color exclusion table.")
+        .description("保存颜色筛选表中勾选的颜色。")
         .defaultValue(new String[0])
         .visible(() -> false)
         .onChanged(value -> { if (colorFilterEnabled.get()) queueWorkPlanUpdate(); })
@@ -181,7 +181,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Boolean> registerSupply = sgSupply.add(new BoolSetting.Builder()
         .name("Select Supply Chests")
-        .description("Hides the settings screen: right-click a labeled container to add it, press Esc to return here.")
+        .description("进入选择模式后隐藏设置，右键点击带物品标签的容器进行登记，按 Esc 返回。")
         .defaultValue(false)
         .onChanged(this::onRegisterSupplyChanged)
         .build()
@@ -189,7 +189,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<List<String>> registeredSupplies = sgSupply.add(new StringListSetting.Builder()
         .name("Supply Chest List")
-        .description("Item ID -> X,Y,Z. This list is saved and can be edited before re-registering containers.")
+        .description("按“物品 ID → X,Y,Z 坐标”保存补给箱，可手动编辑列表或重新登记。")
         .defaultValue(new String[0])
         .onChanged(this::restoreSupplyList)
         .build()
@@ -197,22 +197,22 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Boolean> registerOverflow = sgSupply.add(new BoolSetting.Builder()
         .name("Select Overflow Chests")
-        .description("Hide settings, right-click containers to register multiple surplus-material chests, Esc returns. No item-frame or sign required.")
+        .description("隐藏设置后右键登记余料箱，可登记多个。按 Esc 返回，无须物品展示框或告示牌。")
         .defaultValue(false).onChanged(this::onRegisterOverflowChanged).build());
 
     private final Setting<List<String>> registeredOverflow = sgSupply.add(new StringListSetting.Builder()
         .name("Overflow Chest List")
-        .description("Saved X,Y,Z positions for surplus materials. No labels or sorting required; nearest available chest is used first.")
+        .description("保存余料箱的 X,Y,Z 坐标，优先使用最近的可用箱子，无须标签或分类。")
         .defaultValue(new String[0]).build());
 
     private final Setting<Integer> restockTripsPerCleanup = sgSupply.add(new IntSetting.Builder()
         .name("Restock Trips Per Cleanup")
-        .description("After this many completed supply trips, return surplus before the next trip. Multiple chests/colors in one trip count once. Each new picture cleans first; a full bag may clean earlier.")
+        .description("完成指定趟数的补货后，在下一趟前回存余料。一趟访问多个箱子仍只计一次。每张地图开工前先清理，背包满时可提前清理。")
         .defaultValue(3).range(1, 100).sliderRange(1, 20).build());
 
     private final Setting<Boolean> autoBandWidth = sgGeneral.add(new BoolSetting.Builder()
         .name("Auto Band Width")
-        .description("Use the widest band safely reachable from its middle, including the row just walked past.")
+        .description("根据放置距离选择从中线能安全覆盖的最大条带宽度，包含刚走过的一行。")
         .defaultValue(true)
         .onChanged(value -> queueWorkPlanUpdate())
         .build()
@@ -220,7 +220,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Integer> laneWidth = sgGeneral.add(new IntSetting.Builder()
         .name("Scan Band Width")
-        .description("Manual band width when Auto Band Width is off; still limited by safe reach.")
+        .description("关闭自动条带宽度后使用此值，实际宽度仍受安全放置距离限制。")
         .defaultValue(5)
         .range(1, 16)
         .sliderRange(1, 8)
@@ -230,7 +230,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Boolean> reverseSnake = sgGeneral.add(new BoolSetting.Builder()
         .name("Reverse Snake")
-        .description("Start at the other end of the normal snake route and traverse it backwards. For two players starting on the same side, enable this for one player. Restocking follows the selected direction.")
+        .description("从正常路线的另一端反向蛇形铺设。两人协作时可让其中一人开启，补货按所选方向计算。")
         .defaultValue(false)
         .onChanged(value -> queueWorkPlanUpdate())
         .build()
@@ -238,7 +238,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Double> placeRange = sgGeneral.add(new DoubleSetting.Builder()
         .name("Place Range")
-        .description("Maximum interaction range for map-art targets.")
+        .description("铺设地图画时允许的最大交互距离，单位为格。")
         .defaultValue(3.6)
         .range(2.0, 3.6)
         .sliderRange(2.0, 3.6)
@@ -248,14 +248,14 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Boolean> statusMessages = sgGeneral.add(new BoolSetting.Builder()
         .name("Status Messages")
-        .description("Shows a chat progress message every 10 seconds and whenever the worker stops.")
+        .description("每十秒及任务停止时，在聊天栏显示进度。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Integer> routeRetries = sgNavigation.add(new IntSetting.Builder()
         .name("Route Retries")
-        .description("Replans before a target or supply chest is treated as unreachable.")
+        .description("判定目标或补给箱不可达前，允许重新规划路线的次数。")
         .defaultValue(2)
         .range(0, 6)
         .sliderRange(0, 4)
@@ -264,7 +264,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Boolean> sprintToSupply = sgNavigation.add(new BoolSetting.Builder()
         .name("Sprint To Supply")
-        .description("Sprint on safe outbound routes to material chests. Printing and return trips still walk normally.")
+        .description("前往材料箱补货时，在安全路段疾跑。铺设和补货返回时正常行走。")
         .defaultValue(true)
         .onChanged(enabled -> { if (!enabled) releaseSupplySprint(); })
         .build()
@@ -272,7 +272,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Integer> pathSearchLimit = sgNavigation.add(new IntSetting.Builder()
         .name("Path Search Limit")
-        .description("Maximum real standable cells examined per route.")
+        .description("每次寻路最多检查的真实可站立格子数量。")
         .defaultValue(20000)
         .range(1024, 100000)
         .sliderRange(4096, 50000)
@@ -281,7 +281,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private final Setting<Integer> stuckTimeout = sgNavigation.add(new IntSetting.Builder()
         .name("Stuck Timeout")
-        .description("Ticks without getting closer before the route is replanned.")
+        .description("连续多少游戏刻未接近目标时重新寻路。通常每秒二十游戏刻。")
         .defaultValue(80)
         .range(20, 300)
         .sliderRange(40, 160)
@@ -437,42 +437,42 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private String directoryValidationStatus = "尚未验证目录";
 
     public FullAutoMapArtModule() {
-        super(BuilderToolboxAddon.CATEGORY, "map-artmaker-all-auto", "Independently runs a schematic-directory batch: clear canvas, snake print, create and lock each map, then store the product.");
+        super(BuilderToolboxAddon.CATEGORY, "map-artmaker-all-auto", "依次读取文件夹中的蓝图，自动清理画布、蛇形铺设、生成地图、锁图并存入成品箱。");
     }
 
     @Override
     public WWidget getWidget(GuiTheme theme) {
         WVerticalList root = theme.verticalList();
-        WSection validation = root.add(theme.section("Schematic Directory Validation", true)).expandX().widget();
+        WSection validation = root.add(theme.section("蓝图目录验证", true)).expandX().widget();
         WLabel validationStatus = validation.add(theme.label(directoryValidationStatus)).widget();
-        WButton validate = validation.add(theme.button("Validate / Reinitialize")).widget();
-        validate.tooltip = "Stops the current run, validates this folder and resets the saved batch from Reset Start Map (inclusive).";
+        WButton validate = validation.add(theme.button("验证并重新初始化")).widget();
+        validate.tooltip = "停止当前任务，验证目录，并从指定起始地图序号重建批次，包含所选地图。";
         validate.action = () -> validateBatchDirectory(validationStatus);
-        validation.add(theme.label("Relative to schematics; Chinese paths supported, e.g. 地图画/风景合集 (Ctrl+V)."));
-        validation.add(theme.label("Set Reset Start Map above (1-based, inclusive). Validation resets progress; enable afterward."));
-        validation.add(theme.label("Earlier pictures are skipped. The selected picture is cleared and rebuilt, not resumed."));
-        validation.add(theme.label("Checks file access only; blueprint dimensions/alignment are checked on batch start."));
-        WSection overflowHelp = root.add(theme.section("Overflow Storage", false)).expandX().widget();
-        overflowHelp.add(theme.label("Registered surplus chests: " + overflowPositions().size() + ". Right-click to add, Esc returns."));
-        overflowHelp.add(theme.label("Optional: no registered overflow chests means cleanup is skipped. Otherwise clean first, then every configured number of supply trips."));
-        overflowHelp.add(theme.label("Keeps the upcoming outward/return pair. Only surplus map materials are stored; no items are discarded."));
-        WSection section = theme.section("Color Filter - checked colors are skipped", true);
+        validation.add(theme.label("填写相对于蓝图目录的路径，例如“地图画/风景合集”，支持中文和 Ctrl+V 粘贴。"));
+        validation.add(theme.label("先设置上方起始序号，从 1 开始并包含该张。验证会重置进度，完成后重新开启功能。"));
+        validation.add(theme.label("起始序号之前的地图会跳过，所选地图会清理画布后重新绘制。"));
+        validation.add(theme.label("此处检查文件能否读取，蓝图尺寸和地图网格对齐会在批次启动时检查。"));
+        WSection overflowHelp = root.add(theme.section("余料回存说明", false)).expandX().widget();
+        overflowHelp.add(theme.label("已登记余料箱数量：" + overflowPositions().size() + "。右键添加箱子，按 Esc 返回。"));
+        overflowHelp.add(theme.label("余料箱为可选项，未登记时跳过回存。登记后开工先清理，之后按设定的补货趟数定期清理。"));
+        overflowHelp.add(theme.label("保留接下来往返两条带所需材料，将多余的地图画材料存入余料箱。"));
+        WSection section = theme.section("颜色筛选（勾选后跳过该颜色）", true);
         root.add(section).expandX();
         WHorizontalList controls = section.add(theme.horizontalList()).expandX().widget();
-        controls.add(theme.label("Enable Color Filter"));
+        controls.add(theme.label("启用颜色筛选"));
         WCheckbox enabled = controls.add(theme.checkbox(colorFilterEnabled.get())).widget();
         WLabel status = section.add(theme.label(colorFilterStatus())).widget();
         enabled.action = () -> {
             colorFilterEnabled.set(enabled.checked);
             status.set(colorFilterStatus());
         };
-        enabled.tooltip = "Off by default. Color selections are saved even when filtering is disabled.";
+        enabled.tooltip = "默认关闭。关闭筛选后，勾选记录仍会保存。";
         WTable table = section.add(theme.table()).expandX().widget();
         table.horizontalSpacing = 12;
         for (int panel = 0; panel < 2; panel++) {
-            table.add(theme.label("Swatch"));
-            table.add(theme.label("Color"));
-            table.add(theme.label("Skip"));
+            table.add(theme.label("色块"));
+            table.add(theme.label("颜色"));
+            table.add(theme.label("跳过"));
         }
         table.row();
         DyeColor[] colors = DyeColor.values();
@@ -483,12 +483,10 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
                 ColorSwatch swatch = new ColorSwatch(color);
                 swatch.theme = theme;
                 table.add(swatch);
-                String label = java.util.Arrays.stream(id.split("_"))
-                    .map(word -> Character.toUpperCase(word.charAt(0)) + word.substring(1))
-                    .collect(java.util.stream.Collectors.joining(" "));
+                String label = com.buildertoolbox.utils.ChineseSettings.colorTitle(id);
                 table.add(theme.label(label));
                 WCheckbox skip = table.add(theme.checkbox(excludedColors.get().contains(id))).widget();
-                skip.tooltip = "Checked = skip " + label + " dyed blocks; does not remove existing blocks.";
+                skip.tooltip = "勾选后跳过" + label + "染色方块，已放置的方块会保留。";
                 skip.action = () -> {
                     List<String> selected = new ArrayList<>(excludedColors.get());
                     selected.removeIf(id::equals);
@@ -499,7 +497,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             }
             table.row();
         }
-        section.add(theme.label("Applies to dyed blocks, not all blocks with a similar map color."));
+        section.add(theme.label("按染色方块的颜色筛选，地图颜色相近的其它方块不在筛选范围内。"));
         return root;
     }
 
@@ -570,8 +568,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     }
 
     private String colorFilterStatus() {
-        return colorFilterEnabled.get() ? "Enabled: " + excludedColors.get().size() + " color(s) excluded"
-            : "Disabled: all colors will be printed (selections saved)";
+        return colorFilterEnabled.get() ? "已启用，排除 " + excludedColors.get().size() + " 种颜色"
+            : "未启用，铺设全部颜色（已保存勾选记录）";
     }
 
     private void queueWorkPlanUpdate() {
@@ -3755,7 +3753,7 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
 
     private Setting<Boolean> batchSelector(String name, BatchLocation location) {
         return sgBatch.add(new BoolSetting.Builder().name(name)
-            .description("Hide settings, right-click the target block, Esc returns. Does not also activate the block.")
+            .description("隐藏设置后右键目标方块登记坐标，按 Esc 返回。登记操作不会同时使用该方块。")
             .defaultValue(false).onChanged(enabled -> { if (enabled) beginBatchSelection(location); }).build());
     }
 

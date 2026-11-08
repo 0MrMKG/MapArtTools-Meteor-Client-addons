@@ -58,25 +58,25 @@ public final class AutoCraftModule extends Module {
     private final SettingGroup locations = settings.createGroup("Locations");
     private final Setting<Boolean> selectStorage = locations.add(new BoolSetting.Builder()
         .name("Select Storage Blocks")
-        .description("Hide settings, right-click chests, barrels or shulker boxes to add them. Esc returns to settings. Labels are not required.")
+        .description("隐藏设置后右键登记箱子、木桶或潜影盒，按 Esc 返回，无须物品标签。")
         .defaultValue(false).onChanged(value -> { if (value) enterSelection(false); }).build());
     private final Setting<List<String>> storageList = locations.add(new StringListSetting.Builder()
         .name("Storage Block List")
-        .description("Saved X,Y,Z positions. Each source is processed separately and receives its own products.")
+        .description("保存原料容器的坐标。各容器分别加工，产物放回各自的原容器。")
         .defaultValue(new String[0]).build());
     private final Setting<Boolean> selectTable = locations.add(new BoolSetting.Builder()
         .name("Select Crafting Table")
-        .description("Hide settings and right-click a crafting table to record its position. Esc returns to settings.")
+        .description("隐藏设置后右键登记工作台坐标，按 Esc 返回。")
         .defaultValue(false).onChanged(value -> { if (value) enterSelection(true); }).build());
     private final Setting<List<String>> tablePosition = locations.add(new StringListSetting.Builder()
         .name("Crafting Table Position")
-        .description("One X,Y,Z position. A real crafting table is required for the 3x3 bone-block recipe.")
+        .description("工作台的 X,Y,Z 坐标。合成骨块需要真实工作台的 3×3 合成格。")
         .defaultValue(new String[0]).build());
     private final Setting<String> workDimension = locations.add(new StringSetting.Builder()
         .name("Work Dimension").defaultValue("").visible(() -> false).build());
     private final Setting<Boolean> resume = settings.getDefaultGroup().add(new BoolSetting.Builder()
         .name("Start / Resume")
-        .description("Start or retry after selecting locations or freeing space. Recipe materials already carried by a paused job stay assigned to its original source.")
+        .description("登记位置或腾出空间后，开始任务或继续暂停的任务。暂停时已取出的材料仍归属原容器。")
         .defaultValue(false).onChanged(this::onResumeChanged).build());
 
     private final WorkstationAccess access = new WorkstationAccess(mc);
@@ -96,12 +96,12 @@ public final class AutoCraftModule extends Module {
 
     public AutoCraftModule() {
         super(BuilderToolboxAddon.CATEGORY, "Auto Craft",
-            "Converts bones into bone meal and bone blocks at a registered crafting table, then returns products to the original storage block.");
+            "从登记容器取骨头，在指定工作台加工成骨粉和骨块，再将产物放回原容器。");
     }
 
     @Override
     public WWidget getWidget(GuiTheme theme) {
-        return theme.label("Recipe: " + RECIPE.name());
+        return theme.label("合成配方：骨头 → 骨粉 → 骨块");
     }
 
     @Override
