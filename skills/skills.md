@@ -12,19 +12,18 @@
 - 依赖 Meteor Client、Fabric API、Litematica、MaLiLib。具体版本以 `gradle/libs.versions.toml` 为准。
 - 分类名称为 `Builder Toolbox`；入口为 `src/main/java/com/buildertoolbox/BuilderToolboxAddon.java`。
 - `src/main/resources/fabric.mod.json` 声明客户端环境和 Meteor 入口。
-- 放置思路参考 Xiaohe Lotus，脚下搭路参考 Miku；当前实现包含本工程自己的兼容、确认、寻路及恢复逻辑，不等于原模组的逐字节复制。
+- 放置思路参考 Xiaohe Lotus；当前实现包含本工程自己的兼容、确认、寻路及恢复逻辑，不等于原模组的逐字节复制。
 
 “纯客户端”不意味着可以无视服务端规则：交互距离、支撑面、碰撞、库存同步、服务器延迟和反作弊仍可能影响结果。
 
-## 2. 当前菜单：五个功能
+## 2. 当前菜单：四个功能
 
 | 序号 | 菜单名称 | 主要用途 | 主要实现 |
 | --- | --- | --- | --- |
 | 1 | `Map Art Maker（Once）` | 根据当前平面投影，蛇形行走、铺设和补货 | `modules/LitematicaMapArtModule.java` |
 | 2 | `Map Art Maker（Full Mode）` | 目录批量读图、清画布、绘制、制图、锁图、入箱 | `modules/FullAutoMapArtModule.java`、`fullauto/MapArtBatchController.java` |
-| 3 | `Underfoot Scaffold` | 玩家走路时，在脚下或脚前自动搭实心方块 | `modules/UnderfootScaffoldModule.java` |
-| 4 | `Chest Organizer` | 从分类箱取出错放物品，再归入正确箱或杂物箱 | `modules/ChestOrganizerModule.java` |
-| 5 | `Auto Craft` | 骨头分解骨粉，再合成骨块并回存原箱 | `modules/AutoCraftModule.java` |
+| 3 | `Chest Organizer` | 从分类箱取出错放物品，再归入正确箱或杂物箱 | `modules/ChestOrganizerModule.java` |
+| 4 | `Auto Craft` | 骨头分解骨粉，再合成骨块并回存原箱 | `modules/AutoCraftModule.java` |
 
 表中的序号是说明编号，不代表代码已经给所有菜单标题添加数字前缀。
 
@@ -229,23 +228,6 @@
 
 专属日志为 `config/builder_toolbox/chest-organizer-<SHA256>.properties`，按世界、维度和玩家隔离，保存工作高度、cargo 和待确认转移，可跨客户端重启核对恢复。已扫描箱集合、路径和遍历游标不保存；恢复时先回存已知货物，再重新扫描。
 
-## 6. Underfoot Scaffold：脚下搭路
-
-玩家自己行走，模块从快捷栏取普通实心方块填脚下或脚前缺口；它不读蓝图、不自动走路、不补货，也不是脚手架方块的搭塔/攀爬功能。
-
-| 设置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `Block Filter` | `BLACKLIST` | 可切换白名单 |
-| `Blocks` | 无预置非空名单 | 过滤搭路材料 |
-| `Ahead Distance` | `0.5` | 预测脚前距离，范围 `0–0.9` |
-| `Place Range` | `3.6` | 范围 `2–4.5`，独立于地图画范围上限 |
-
-只在玩家落地、无界面、没有等待旋转时工作。根据水平速度预测前方，再尝试脚下 `玩家脚格Y-1`；快捷栏从当前选中格循环寻找满方块，排除下落方块，按黑白名单过滤。
-
-要求相邻真实支撑，跳过上方支撑与可交互工作方块；转向后主手交互，临时选槽再恢复。成功后最多等待约 6 tick，失败位置约 8 tick 冷却。没有独立服务器方块确认账本或任务磁盘恢复。
-
-该模块没有接入其它自动移动任务的 `AutomationControl`。不要把“所有自动功能都互斥”作为假设，也不建议在地图画任务工作时额外开启它来混合控制放置。
-
 ## 7. Auto Craft：骨头加工骨块
 
 ### 7.1 当前支持的配方
@@ -347,7 +329,7 @@ Java 业务文件均在 `src/main/java/com/buildertoolbox/` 下：
 
 | 区域 | 关键文件 | 职责 |
 | --- | --- | --- |
-| 注册 | `BuilderToolboxAddon.java` | 五个菜单、分类、显示标题兼容 |
+| 注册 | `BuilderToolboxAddon.java` | 四个菜单、分类、显示标题兼容 |
 | 菜单顺序 | `mixin/ModulesMixin.java` | Meteor 排序后仅恢复本分类的固定显示顺序 |
 | 普通地图画内部放置 | `modules/LitematicaPrinterModule.java` | 普通地图画私有实例调用的放置实现，不注册独立菜单或开关 |
 | 普通地图画 | `modules/LitematicaMapArtModule.java` | 投影矩阵、条带、补货、普通完成判断 |
@@ -363,7 +345,6 @@ Java 业务文件均在 `src/main/java/com/buildertoolbox/` 下：
 | 服务端观察 | `utils/ServerPlacementLedger.java` | 普通地图画的预测/服务器状态区分 |
 | 整理箱子 | `modules/ChestOrganizerModule.java`、`utils/OrganizerJournal.java` | cargo、待确认转移与恢复 |
 | 自动合成 | `modules/AutoCraftModule.java`、`utils/CraftingBatchPlan.java` | 当前配方链、容量和转换校验 |
-| 脚下搭路 | `modules/UnderfootScaffoldModule.java` | 独立脚下/脚前实心方块放置 |
 | 任务互斥 | `utils/AutomationControl.java`、`AutomationLease.java`、`fullauto/MapArtModeGuard.java` | 控制权与两种地图画的边界 |
 | 暂停覆盖 | `mixin/ScreenMixin.java` | 仅运行中地图画的 Esc 暂停处理 |
 

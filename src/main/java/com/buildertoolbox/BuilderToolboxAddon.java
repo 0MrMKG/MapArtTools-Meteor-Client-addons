@@ -5,7 +5,6 @@ import com.buildertoolbox.modules.LitematicaMapArtModule;
 import com.buildertoolbox.modules.FullAutoMapArtModule;
 import com.buildertoolbox.fullauto.MapArtModeGuard;
 import com.buildertoolbox.modules.ChestOrganizerModule;
-import com.buildertoolbox.modules.UnderfootScaffoldModule;
 import com.buildertoolbox.modules.AutoCraftModule;
 import java.lang.reflect.Field;
 import java.util.Comparator;
@@ -29,9 +28,6 @@ public final class BuilderToolboxAddon extends MeteorAddon {
         FullAutoMapArtModule fullAuto = new FullAutoMapArtModule();
         setMenuTitle(fullAuto, "Map Art Maker（Full Mode） [全自动地图画制作]");
         Modules.get().add(fullAuto);
-        UnderfootScaffoldModule scaffold = new UnderfootScaffoldModule();
-        setMenuTitle(scaffold, "Underfoot Scaffold [脚下搭路]");
-        Modules.get().add(scaffold);
         ChestOrganizerModule organizer = new ChestOrganizerModule();
         setMenuTitle(organizer, "Chest Organizer [箱子整理]");
         Modules.get().add(organizer);
@@ -50,9 +46,8 @@ public final class BuilderToolboxAddon extends MeteorAddon {
     private static int menuOrder(Module module) {
         if (module instanceof LitematicaMapArtModule) return 0;
         if (module instanceof FullAutoMapArtModule) return 1;
-        if (module instanceof UnderfootScaffoldModule) return 2;
-        if (module instanceof ChestOrganizerModule) return 3;
-        if (module instanceof AutoCraftModule) return 4;
+        if (module instanceof ChestOrganizerModule) return 2;
+        if (module instanceof AutoCraftModule) return 3;
         return Integer.MAX_VALUE;
     }
 

@@ -15,25 +15,26 @@ public final class ModuleRegistrationSourceTest {
         String engine = read(root + "modules/LitematicaPrinterModule.java");
         String registration = method(addon, "public void onInitialize()");
         long count = Pattern.compile("Modules\\.get\\(\\)\\.add\\(").matcher(registration).results().count();
-        check(count == 5, "exactly five public modules must be registered after removing the standalone printer");
+        check(count == 4, "exactly four public modules must be registered after removing underfoot scaffold");
         int once = registration.indexOf("Modules.get().add(once)");
         int full = registration.indexOf("Modules.get().add(fullAuto)");
-        int scaffold = registration.indexOf("Modules.get().add(new UnderfootScaffoldModule())");
-        int organizer = registration.indexOf("Modules.get().add(new ChestOrganizerModule())");
-        int craft = registration.indexOf("Modules.get().add(new AutoCraftModule())");
-        check(once >= 0 && once < full && full < scaffold && scaffold < organizer && organizer < craft,
-            "menu registration order must be Once, Full Mode, Underfoot Scaffold, Chest Organizer, Auto Craft");
+        int organizer = registration.indexOf("Modules.get().add(organizer)");
+        int craft = registration.indexOf("Modules.get().add(craft)");
+        check(once >= 0 && once < full && full < organizer && organizer < craft,
+            "menu registration order must be Once, Full Mode, Chest Organizer, Auto Craft");
         check(registration.contains("applyMenuOrder(Modules.get())"), "initial registration must apply the explicit category order");
+        check(!Files.exists(Path.of(root + "modules/UnderfootScaffoldModule.java"))
+            && !addon.contains("UnderfootScaffoldModule"), "deleted scaffold must have no source or registration");
         String ordering = method(addon, "public static void applyMenuOrder(Modules modules)").replaceAll("\\s+", "");
         check(ordering.contains("modules.getGroup(CATEGORY).sort(Comparator.comparingInt(BuilderToolboxAddon::menuOrder))")
             && !ordering.contains("getAll(") && !ordering.contains("getGroups("),
             "explicit ordering must sort only the Builder Toolbox category");
         String ranks = method(addon, "private static int menuOrder(Module module)").replaceAll("\\s+", "");
-        String[] classes = {"LitematicaMapArtModule", "FullAutoMapArtModule", "UnderfootScaffoldModule", "ChestOrganizerModule", "AutoCraftModule"};
+        String[] classes = {"LitematicaMapArtModule", "FullAutoMapArtModule", "ChestOrganizerModule", "AutoCraftModule"};
         for (int rank=0;rank<classes.length;rank++)
             check(ranks.contains("if(moduleinstanceof" + classes[rank] + ")return" + rank + ";"),
                 "wrong fixed menu rank for " + classes[rank]);
-        check(ranks.contains("returnInteger.MAX_VALUE;"), "unknown addon modules must sort after the five fixed entries");
+        check(ranks.contains("returnInteger.MAX_VALUE;"), "unknown addon modules must sort after the four fixed entries");
         String mixin = read(root + "mixin/ModulesMixin.java").replaceAll("\\s+", "");
         check(mixin.contains("@Mixin(value=Modules.class,remap=false)")
             && mixin.contains("@Inject(method=\"sortModules\",at=@At(\"TAIL\"))")
@@ -45,8 +46,8 @@ public final class ModuleRegistrationSourceTest {
             "the Modules ordering mixin must be enabled in the client mixin resource");
         check(!registration.contains("new LitematicaPrinterModule") && !registration.contains("add(printer)")
             && !registration.contains("Schematic Printer"), "the standalone schematic printer must not remain a menu entry");
-        check(registration.contains("\"Map Art Maker（Once）\"")
-            && registration.contains("\"Map Art Maker（Full Mode）\"") && registration.contains("setMenuTitle("),
+        check(registration.contains("\"Map Art Maker（Once） [单次地图画制作]\"")
+            && registration.contains("\"Map Art Maker（Full Mode） [全自动地图画制作]\"") && registration.contains("setMenuTitle("),
             "both map-art entries must use their requested display titles");
         check(mapArt.contains("super(BuilderToolboxAddon.CATEGORY, \"Map Art Maker\"")
             && fullAuto.contains("\"map-artmaker-all-auto\""), "renaming the menu must preserve saved internal module names");
@@ -67,7 +68,7 @@ public final class ModuleRegistrationSourceTest {
             "engine lifecycle hook must clear queued tokens before resetting other runtime state");
         check(engine.contains("if (queuedProjectionPlacements.get(immutablePos) != token) return;"),
             "cleared external tokens must prevent delayed callbacks from placing after stop");
-        System.out.println("ModuleRegistrationSource: five menus, compatible display titles, private placement engine and stop/start token cleanup passed (source checks only).");
+        System.out.println("ModuleRegistrationSource: four menus, compatible display titles, private placement engine and stop/start token cleanup passed (source checks only).");
     }
 
     private static String read(String file) throws Exception { return Files.readString(Path.of(file), StandardCharsets.UTF_8); }
