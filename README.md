@@ -8,9 +8,9 @@
 
 | 分支 | 类型 | 运行依赖与界面 | 适用场景 |
 | --- | --- | --- | --- |
-| [MapArtTools-Satelles](https://github.com/0MrMKG/MapArtTools-Meteor-Client-addons/tree/MapArtTools-Satelles) | Meteor 插件版主线，原 `master` | 需要安装 Meteor Client，功能集成在 Meteor 的 GUI 中。 | 使用 Meteor 的用户日常使用与主线开发。 |
-| [MapArtTools-Satelles-testbuild](https://github.com/0MrMKG/MapArtTools-Meteor-Client-addons/tree/MapArtTools-Satelles-testbuild) | Meteor 插件版实验分支，原 `test-build` | 同样依赖 Meteor Client，用于验证放置、行走等实验性改动。 | 测试新策略、反馈问题；功能和实现可能与主线不同。 |
-| [MapArtTools-Solus](https://github.com/0MrMKG/MapArtTools-Meteor-Client-addons/tree/MapArtTools-Solus) | 独立 Fabric 模组，原“无反作弊版本” | 无须安装完整 Meteor Client，内置裁剪后的 GUI 控件，按右 Ctrl 打开小窗口。 | 只需要地图画工具和独立界面的用户。 |
+| [MapArtTools-Satelles](https://github.com/0MrMKG/MapArtTools-Meteor-Client-addons/tree/MapArtTools-Satelles) | Meteor 插件版主线 | 需要安装 Meteor Client，功能集成在 Meteor 的 GUI 中。 | 使用 Meteor 的用户日常使用与主线开发。 |
+| [MapArtTools-Satelles-testbuild](https://github.com/0MrMKG/MapArtTools-Meteor-Client-addons/tree/MapArtTools-Satelles-testbuild) | Meteor 插件版实验分支 | 同样依赖 Meteor Client，用于验证放置、行走等实验性改动。 | 测试新策略、反馈问题；功能和实现可能与主线不同。 |
+| [MapArtTools-Solus](https://github.com/0MrMKG/MapArtTools-Meteor-Client-addons/tree/MapArtTools-Solus) | 独立 Fabric 模组 | 无须安装完整 Meteor Client，内置裁剪后的 GUI 控件，按右 Ctrl 打开小窗口。 | 只需要地图画工具和独立界面的用户。 |
 
 三个分支当前均面向 **Minecraft 1.21.11、Java 21**，需要 Fabric 环境、Fabric API、Litematica 和 MaLiLib。它们分别维护，更新进度和构建产物以对应分支为准。
 
