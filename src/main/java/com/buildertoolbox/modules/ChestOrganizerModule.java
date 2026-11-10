@@ -68,7 +68,7 @@ public final class ChestOrganizerModule extends Module {
     private static final int OPEN_WAIT_TICKS = 12;
     private static final int TRANSFER_WAIT_TICKS = 8;
 
-    private final SettingGroup sgStorage = settings.createGroup("Storage");
+    private final SettingGroup sgStorage = settings.createGroup("Locations");
     private final Setting<Boolean> selectChests = sgStorage.add(new BoolSetting.Builder()
         .name("Select Storage Chests")
         .description("隐藏设置后右键登记带物品标签的箱子，按 Esc 返回。")

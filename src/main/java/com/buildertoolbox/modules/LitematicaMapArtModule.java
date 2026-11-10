@@ -1,6 +1,7 @@
 package com.buildertoolbox.modules;
 
 import com.buildertoolbox.BuilderToolboxAddon;
+import com.buildertoolbox.utils.RestockSurplusController;
 import com.buildertoolbox.utils.MapArtAutoEat;
 import com.buildertoolbox.utils.MapArtNavigationPolicy;
 import com.buildertoolbox.utils.MapArtProgressTimer;
@@ -102,15 +103,20 @@ import org.lwjgl.glfw.GLFW;
 public final class LitematicaMapArtModule extends Module {
     private static final long EMPTY_SUPPLY_RECHECK_TICKS = 20L * 60L;
     private static final long PLACEMENT_CONFIRM_TICKS = 20L;
-    private static final int RESTOCK_MAX_LOOKAHEAD_LANES = 6;
+    private static final int RESTOCK_MAX_LOOKAHEAD_LANES = 2;
     private static final int MAX_PENDING_PLACEMENTS = 3;
     private static final int WORK_REGION_SIZE = 8;
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
         Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
     };
 
+    private final RestockSurplusController restockSurplus = new RestockSurplusController(mc);
+    private ProjectionTarget surplusRestockTarget;
+    private boolean skipRestockSurplusOnce;
+    private long nextSurplusCheckTick;
+
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgSupply = settings.createGroup("Supplies");
+    private final SettingGroup sgLocations = settings.createGroup("Locations");
     private final SettingGroup sgNavigation = settings.createGroup("Navigation");
     private final Setting<Boolean> autoEat = sgGeneral.add(new BoolSetting.Builder()
         .name("Auto Eat")
@@ -142,7 +148,7 @@ public final class LitematicaMapArtModule extends Module {
         .build()
     );
 
-    private final Setting<Boolean> registerSupply = sgSupply.add(new BoolSetting.Builder()
+    private final Setting<Boolean> registerSupply = sgLocations.add(new BoolSetting.Builder()
         .name("Select Supply Chests")
         .description("进入选择模式后隐藏设置，右键点击带物品标签的容器进行登记，按 Esc 返回。")
         .defaultValue(false)
@@ -150,7 +156,7 @@ public final class LitematicaMapArtModule extends Module {
         .build()
     );
 
-    private final Setting<List<String>> registeredSupplies = sgSupply.add(new StringListSetting.Builder()
+    private final Setting<List<String>> registeredSupplies = sgLocations.add(new StringListSetting.Builder()
         .name("Supply Chest List")
         .description("按“物品 ID → X,Y,Z 坐标”保存补给箱，可手动编辑列表或重新登记。")
         .defaultValue(new String[0])
@@ -462,6 +468,7 @@ public final class LitematicaMapArtModule extends Module {
 
     @Override
     public void onDeactivate() {
+        restockSurplus.stop(); surplusRestockTarget = null;
         cursorRecovery.reset();
         autoEater.stop();
         if (state != TaskState.IDLE && statusMessages.get()) {
@@ -1078,6 +1085,7 @@ public final class LitematicaMapArtModule extends Module {
             tickReturnFromRestock();
             return;
         }
+        if (serviceRestockSurplusForCapacity()) return;
         tickSnakeWork();
     }
 
@@ -1445,6 +1453,56 @@ public final class LitematicaMapArtModule extends Module {
         }
     }
 
+    /** Full bags must be considered before supply eligibility rejects every missing color. */
+    private boolean serviceRestockSurplusForCapacity() {
+        if (tick < nextSurplusCheckTick || restockSurplus.active() || emptyInventorySlots() > 0
+            || printer.hasQueuedProjectionPlacement() || !dispatchedPlacements.isEmpty()) return false;
+        nextSurplusCheckTick = tick + 20;
+        List<List<ProjectionTarget>> bands = upcomingTargetBands();
+        if (bands.isEmpty()) return false;
+        Map<Item,Integer> demand = new LinkedHashMap<>();
+        for (ProjectionTarget target : bands.getFirst()) demand.merge(target.state().getBlock().asItem(), 1, Integer::sum);
+        for (ProjectionTarget target : bands.getFirst()) {
+            Item item = target.state().getBlock().asItem();
+            if (countInventory(item) < demand.get(item) && !supplies.getOrDefault(item,List.of()).isEmpty())
+                return beginRestockSurplus(target);
+        }
+        return false;
+    }
+
+    private boolean beginRestockSurplus(ProjectionTarget current) {
+        List<List<Item>> bands = upcomingTargetBands().stream().limit(2)
+            .map(band -> band.stream().map(target -> target.state().getBlock().asItem()).toList()).toList();
+        if (bands.isEmpty()) return false;
+        Item item = current.state().getBlock().asItem();
+        List<BlockPos> destinations = supplies.getOrDefault(item, List.of());
+        BlockPos destination = destinations.stream().min(Comparator.comparingDouble(this::distanceToPlayer)).orElse(null);
+        if (!restockSurplus.begin(bands, RestockSurplusController.carpetMaterials(), 0, destination, tick)) return false;
+        releaseMovement(); resetNavigation(); resetRestockTransfer();
+        if (restockReturnPos == null) restockReturnPos = mc.player.getBlockPos().toImmutable();
+        returningFromRestock = false;
+        surplusRestockTarget = current;
+        supplyChest = supplyStand = null; supplyItem = null;
+        supplyOpenTick = supplyAimTick = -1;
+        state = TaskState.RESTOCK;
+        activity = restockSurplus.status();
+        return true;
+    }
+
+    private void tickRestockSurplus() {
+        releaseMovement();
+        boolean working = restockSurplus.tick(tick);
+        activity = restockSurplus.status();
+        if (working) return;
+        ProjectionTarget shortage = surplusRestockTarget;
+        surplusRestockTarget = null;
+        state = TaskState.WORK;
+        if (shortage != null && !remainingTargets.isEmpty()) {
+            skipRestockSurplusOnce = true;
+            beginRestock(shortage);
+        }
+    }
+
     private void beginRestock(ProjectionTarget current) {
         // No inventory sorting: decide directly from the current slots.
         releaseMovement();
@@ -1453,8 +1511,11 @@ public final class LitematicaMapArtModule extends Module {
             activity = "等待在途放置确认后直接补货";
             return;
         }
+        boolean allowDiscard = !skipRestockSurplusOnce;
+        skipRestockSurplusOnce = false;
+        if (allowDiscard && beginRestockSurplus(current)) return;
         state = TaskState.WORK;
-        BlockPos returnPos = mc.player.getBlockPos().toImmutable();
+        BlockPos returnPos = restockReturnPos != null ? restockReturnPos : mc.player.getBlockPos().toImmutable();
         resetNavigation();
         if (!selectNextSupply(current.state().getBlock().asItem())) {
             if (findStockedTarget() != null) {
@@ -1802,6 +1863,7 @@ public final class LitematicaMapArtModule extends Module {
     }
 
     private void tickCapacityWait() {
+        if (serviceRestockSurplusForCapacity()) return;
         releaseMovement();
         if (tick % 20 != 0) return;
         if (resumeStockedBand()) return;
@@ -1932,6 +1994,7 @@ public final class LitematicaMapArtModule extends Module {
     }
 
     private void tickRestock() {
+        if (restockSurplus.active()) { tickRestockSurplus(); return; }
         // Interrupted cursor operations are settled by the tick entry point;
         // they never switch this worker into PAUSED.
         if (supplyChest != null) {
@@ -2650,6 +2713,7 @@ public final class LitematicaMapArtModule extends Module {
     }
 
     private void resetRuntime() {
+        restockSurplus.stop(); surplusRestockTarget = null; skipRestockSurplusOnce = false; nextSurplusCheckTick = 0;
         ownedSupplyHandler = null;
         cursorSpaceAttempts = 0; cursorSpaceCount = -1; cursorSpaceItem = null;
         placementReceipts.clear();
