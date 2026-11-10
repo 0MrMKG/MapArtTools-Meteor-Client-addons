@@ -32,6 +32,9 @@ dependencies {
         exclude(group = "fi.dy.masa.malilib")
     }
     modImplementation(libs.malilib)
+    // Loom's development classpath does not load these mods' nested libraries.
+    // Litematica and MaLiLib already bundle this dependency in normal releases.
+    modRuntimeOnly(libs.conditional.mixin)
 }
 
 tasks {
