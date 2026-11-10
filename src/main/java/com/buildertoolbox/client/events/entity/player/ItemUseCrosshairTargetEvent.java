@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.events.entity.player; import net.minecraft.util.hit.HitResult; public final class ItemUseCrosshairTargetEvent {public HitResult target; public ItemUseCrosshairTargetEvent(HitResult h){target=h;}}

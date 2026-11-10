@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.events.game; import net.minecraft.client.gui.screen.Screen; import com.buildertoolbox.client.events.Event; public final class OpenScreenEvent extends Event {public final Screen screen; public OpenScreenEvent(Screen s){screen=s;}}

@@ -2,33 +2,29 @@
   "schemaVersion": 1,
   "id": "builder_toolbox",
   "version": "${version}",
-  "name": "Builder Toolbox",
-  "description": "Builder Toolbox addon for Meteor Client.",
+  "name": "Map Art Tools",
+  "description": "Standalone Fabric tools for automated map-art construction.",
   "authors": [
     "0MrMKG"
   ],
   "icon": "assets/builder_toolbox/icon.png",
   "environment": "client",
-  "mixins": ["builder_toolbox.mixins.json"],
+  "mixins": [
+    "builder_toolbox.mixins.json"
+  ],
   "entrypoints": {
-    "meteor": [
+    "client": [
       "com.buildertoolbox.BuilderToolboxAddon"
     ]
   },
-  "custom": {
-    "meteor-client:color": "225,25,25",
-    "modmenu": {
-      "parent": {
-        "id": "meteor-client"
-      }
-    }
-  },
   "depends": {
     "java": ">=21",
-    "minecraft": ["${mc_version}"],
+    "minecraft": [
+      "${mc_version}"
+    ],
     "fabric-api": "*",
-    "meteor-client": "*",
     "litematica": "*",
     "malilib": "*"
-  }
+  },
+  "license": "GPL-3.0-only"
 }

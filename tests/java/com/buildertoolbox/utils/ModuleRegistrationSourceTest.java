@@ -13,7 +13,7 @@ public final class ModuleRegistrationSourceTest {
         String mapArt = read(root + "modules/LitematicaMapArtModule.java");
         String fullAuto = read(root + "modules/FullAutoMapArtModule.java");
         String engine = read(root + "modules/LitematicaPrinterModule.java");
-        String registration = method(addon, "public void onInitialize()");
+        String registration = method(addon, "public void onInitializeClient()");
         long count = Pattern.compile("Modules\\.get\\(\\)\\.add\\(").matcher(registration).results().count();
         check(count == 4, "exactly four public modules must be registered after removing underfoot scaffold");
         int once = registration.indexOf("Modules.get().add(once)");
@@ -35,15 +35,9 @@ public final class ModuleRegistrationSourceTest {
             check(ranks.contains("if(moduleinstanceof" + classes[rank] + ")return" + rank + ";"),
                 "wrong fixed menu rank for " + classes[rank]);
         check(ranks.contains("returnInteger.MAX_VALUE;"), "unknown addon modules must sort after the four fixed entries");
-        String mixin = read(root + "mixin/ModulesMixin.java").replaceAll("\\s+", "");
-        check(mixin.contains("@Mixin(value=Modules.class,remap=false)")
-            && mixin.contains("@Inject(method=\"sortModules\",at=@At(\"TAIL\"))")
-            && mixin.contains("BuilderToolboxAddon.applyMenuOrder((Modules)(Object)this)"),
-            "Meteor alphabetical sorting must be followed by the addon order at the Modules mixin TAIL");
-        String mixins = read("src/main/resources/builder_toolbox.mixins.json");
-        check(mixins.contains("\"package\": \"com.buildertoolbox.mixin\"")
-            && Pattern.compile("\"client\"\\s*:\\s*\\[[^]]*\"ModulesMixin\"", Pattern.DOTALL).matcher(mixins).find(),
-            "the Modules ordering mixin must be enabled in the client mixin resource");
+        check(addon.contains("implements ClientModInitializer"), "standalone Fabric client entrypoint");
+        String metadata=read("src/main/resources/fabric.mod.json");
+        check(!metadata.contains("meteor-client") && metadata.contains("\"client\""), "no Meteor runtime requirement");
         check(!registration.contains("new LitematicaPrinterModule") && !registration.contains("add(printer)")
             && !registration.contains("Schematic Printer"), "the standalone schematic printer must not remain a menu entry");
         check(registration.contains("\"Map Art Maker（Once） [单次地图画制作]\"")

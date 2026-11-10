@@ -8,19 +8,19 @@ import com.buildertoolbox.modules.ChestOrganizerModule;
 import com.buildertoolbox.modules.AutoCraftModule;
 import java.lang.reflect.Field;
 import java.util.Comparator;
-import meteordevelopment.meteorclient.addons.MeteorAddon;
-import meteordevelopment.meteorclient.systems.modules.Category;
-import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.systems.modules.Modules;
+import net.fabricmc.api.ClientModInitializer;
+import com.buildertoolbox.client.systems.modules.Category;
+import com.buildertoolbox.client.systems.modules.Module;
+import com.buildertoolbox.client.systems.modules.Modules;
 import org.slf4j.Logger;
 
 /** Entry point for the Builder Toolbox Meteor addon. */
-public final class BuilderToolboxAddon extends MeteorAddon {
+public final class BuilderToolboxAddon implements ClientModInitializer {
     public static final Logger LOG = LogUtils.getLogger();
     public static final Category CATEGORY = new Category("Builder Toolbox");
 
     @Override
-    public void onInitialize() {
+    public void onInitializeClient() {
         LOG.info("Initializing Builder Toolbox");
         LitematicaMapArtModule once = new LitematicaMapArtModule();
         setMenuTitle(once, "Map Art Maker（Once） [单次地图画制作]");
@@ -36,6 +36,8 @@ public final class BuilderToolboxAddon extends MeteorAddon {
         Modules.get().add(craft);
         applyMenuOrder(Modules.get());
         MapArtModeGuard.install();
+        com.buildertoolbox.client.StandaloneClient.install();
+        com.buildertoolbox.client.Config.load();
     }
 
     /** Meteor alphabetizes groups at startup; keep only our category in its requested order. */
@@ -64,12 +66,10 @@ public final class BuilderToolboxAddon extends MeteorAddon {
         }
     }
 
-    @Override
     public void onRegisterCategories() {
         Modules.registerCategory(CATEGORY);
     }
 
-    @Override
     public String getPackage() {
         return "com.buildertoolbox";
     }

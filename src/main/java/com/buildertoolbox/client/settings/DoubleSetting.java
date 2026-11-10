@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.settings; public final class DoubleSetting {public static class Builder extends SettingBuilder<Double,Builder> {public Builder(){value=0.0;}}}

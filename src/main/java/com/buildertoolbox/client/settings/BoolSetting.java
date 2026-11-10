@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.settings; public final class BoolSetting {public static class Builder extends SettingBuilder<Boolean,Builder> {public Builder(){value=false;}}}

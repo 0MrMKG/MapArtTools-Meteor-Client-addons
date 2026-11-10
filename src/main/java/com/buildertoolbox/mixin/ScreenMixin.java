@@ -2,7 +2,7 @@ package com.buildertoolbox.mixin;
 
 import com.buildertoolbox.modules.LitematicaMapArtModule;
 import com.buildertoolbox.modules.FullAutoMapArtModule;
-import meteordevelopment.meteorclient.systems.modules.Modules;
+import com.buildertoolbox.client.systems.modules.Modules;
 import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.Screen;
 import org.spongepowered.asm.mixin.Mixin;

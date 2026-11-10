@@ -10,7 +10,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import meteordevelopment.meteorclient.utils.player.InvUtils;
+import com.buildertoolbox.client.utils.player.InvUtils;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;

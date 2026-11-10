@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.settings; import java.util.*; public final class BlockListSetting {public static class Builder extends SettingBuilder<List<net.minecraft.block.Block>,Builder> { public Builder(){value=new ArrayList<>();} public Builder defaultValue(net.minecraft.block.Block... values){value=new ArrayList<>(Arrays.asList(values));return this;}}}

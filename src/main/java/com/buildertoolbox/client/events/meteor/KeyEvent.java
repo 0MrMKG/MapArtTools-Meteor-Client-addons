@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.events.meteor; import com.buildertoolbox.client.events.Event; import com.buildertoolbox.client.utils.misc.input.KeyAction; public final class KeyEvent extends Event {private final int value; public final KeyAction action; public KeyEvent(int value,int action){this.value=value;this.action=KeyAction.of(action);} public int key(){return value;}}

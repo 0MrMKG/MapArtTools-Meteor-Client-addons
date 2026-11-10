@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.settings; import java.util.*; public final class StringListSetting {public static class Builder extends SettingBuilder<List<String>,Builder> { public Builder(){value=new ArrayList<>();} public Builder defaultValue(String... values){value=new ArrayList<>(Arrays.asList(values));return this;}}}
