@@ -32,8 +32,8 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: snapshot
-          name: Dev Build
+          tag_name: ${{ github.ref_name == 'master' && 'snapshot' || format('snapshot-{0}', github.ref_name) }}
+          name: ${{ github.ref_name == 'master' && 'Dev Build' || format('Dev Build ({0})', github.ref_name) }}
           prerelease: true
           files: |
             ./build/libs/*.jar
