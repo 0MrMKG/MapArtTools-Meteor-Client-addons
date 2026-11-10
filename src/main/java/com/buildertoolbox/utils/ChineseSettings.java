@@ -33,6 +33,8 @@ public final class ChineseSettings {
         Map.entry("Allowed Missing Blocks", "允许漏放格数"),
         Map.entry("Canvas Origin", "画布原点"),
         Map.entry("Set Canvas Origin", "选择画布原点"),
+        Map.entry("Canvas X Direction", "X 轴扩展方向"),
+        Map.entry("Canvas Z Direction", "Z 轴扩展方向"),
         Map.entry("Clear Lever", "清理拉杆位置"),
         Map.entry("Set Clear Lever", "选择清理拉杆"),
         Map.entry("Map Supply", "地图原料箱位置"),

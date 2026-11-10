@@ -1,0 +1,11 @@
+GUI design reference
+
+Catppuccin Addon by Pindour
+https://github.com/X-C-0/Catppuccin-Addon
+Reference artifact: catppuccin-addon-2.2.0+mc1.21.11.jar (provided locally by the user).
+
+The standalone GUI uses the Catppuccin Mocha palette, a green accent, layered
+surfaces, rounded controls, subtle window shadows and hover/activation feedback
+inspired by this add-on. The rendering adapter uses Minecraft DrawContext and
+the retained Meteor widget tree. No Catppuccin add-on classes, textures, fonts,
+mixins or runtime dependencies are bundled.
