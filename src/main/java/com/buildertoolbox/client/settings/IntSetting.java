@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.settings; public final class IntSetting {public static class Builder extends SettingBuilder<Integer,Builder> {public Builder(){value=0;}}}

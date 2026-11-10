@@ -1,0 +1,6 @@
+package com.buildertoolbox.mixin;import net.minecraft.client.MinecraftClient;import net.minecraft.client.gui.screen.Screen;import org.spongepowered.asm.mixin.Mixin;import org.spongepowered.asm.mixin.injection.*;import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;@Mixin(MinecraftClient.class)public abstract class ClientScreenMixin {
+ @org.spongepowered.asm.mixin.Shadow public net.minecraft.util.hit.HitResult crosshairTarget;
+ private net.minecraft.util.hit.HitResult tools$originalTarget;
+ @Inject(method="doItemUse",at=@At("HEAD"))private void tools$use(CallbackInfo ci){tools$originalTarget=crosshairTarget;crosshairTarget=com.buildertoolbox.client.ClientRuntime.EVENT_BUS.post(new com.buildertoolbox.client.events.entity.player.ItemUseCrosshairTargetEvent(crosshairTarget)).target;}
+ @Inject(method="doItemUse",at=@At("RETURN"))private void tools$restore(CallbackInfo ci){crosshairTarget=tools$originalTarget;tools$originalTarget=null;}
+@Inject(method="setScreen",at=@At("HEAD"),cancellable=true)private void tools$screen(Screen screen,CallbackInfo ci){if(com.buildertoolbox.client.ClientRuntime.EVENT_BUS.post(new com.buildertoolbox.client.events.game.OpenScreenEvent(screen)).isCancelled())ci.cancel();}}

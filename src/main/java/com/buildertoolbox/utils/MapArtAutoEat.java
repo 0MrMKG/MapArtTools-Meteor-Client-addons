@@ -1,7 +1,7 @@
 package com.buildertoolbox.utils;
 
 import java.util.function.Consumer;
-import meteordevelopment.meteorclient.utils.player.InvUtils;
+import com.buildertoolbox.client.utils.player.InvUtils;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.item.ItemStack;

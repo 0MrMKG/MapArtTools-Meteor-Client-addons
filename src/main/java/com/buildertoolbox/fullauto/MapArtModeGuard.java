@@ -2,10 +2,10 @@ package com.buildertoolbox.fullauto;
 
 import com.buildertoolbox.modules.FullAutoMapArtModule;
 import com.buildertoolbox.modules.LitematicaMapArtModule;
-import meteordevelopment.meteorclient.MeteorClient;
-import meteordevelopment.meteorclient.events.meteor.ActiveModulesChangedEvent;
-import meteordevelopment.meteorclient.systems.modules.Modules;
-import meteordevelopment.orbit.EventHandler;
+import com.buildertoolbox.client.ClientRuntime;
+import com.buildertoolbox.client.events.meteor.ActiveModulesChangedEvent;
+import com.buildertoolbox.client.systems.modules.Modules;
+import com.buildertoolbox.client.events.EventHandler;
 
 /** Integration boundary only: the original module always keeps control. */
 public final class MapArtModeGuard {
@@ -17,7 +17,7 @@ public final class MapArtModeGuard {
 
     public static void install() {
         if (installed) return;
-        MeteorClient.EVENT_BUS.subscribe(INSTANCE);
+        ClientRuntime.EVENT_BUS.subscribe(INSTANCE);
         installed = true;
     }
 

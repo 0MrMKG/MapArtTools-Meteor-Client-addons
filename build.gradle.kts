@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.fabric.loom)
 }
 
+java { withSourcesJar() }
+
 base {
     archivesName = properties["archives_base_name"] as String
     version = libs.versions.mod.version.get()
@@ -12,14 +14,7 @@ repositories {
     maven("https://api.modrinth.com/maven")
     maven("https://jitpack.io")
     maven("https://maven.fallenbreath.me/releases")
-    maven {
-        name = "meteor-maven"
-        url = uri("https://maven.meteordev.org/releases")
-    }
-    maven {
-        name = "meteor-maven-snapshots"
-        url = uri("https://maven.meteordev.org/snapshots")
-    }
+
 }
 
 dependencies {
@@ -27,7 +22,6 @@ dependencies {
     mappings(variantOf(libs.yarn) { classifier("v2") })
     modImplementation(libs.fabric.loader)
     modImplementation(libs.fabric.api)
-    modImplementation(libs.meteor.client)
     modImplementation(libs.litematica) {
         exclude(group = "fi.dy.masa.malilib")
     }
@@ -52,6 +46,7 @@ tasks {
     }
 
     jar {
+        from("licenses") { into("licenses") }
         inputs.property("archivesName", project.base.archivesName.get())
         from("LICENSE") {
             rename { "${it}_${inputs.properties["archivesName"]}" }
@@ -75,10 +70,14 @@ val compileRegression by tasks.registering(JavaCompile::class) {
     source(fileTree("tests/java") { include("**/*.java") })
     source(provider {
         fileTree("src/main/java") { include("**/*.java") }.files.filter { file ->
+            if (file.invariantSeparatorsPath.contains("/client/")) return@filter false
             val source = file.readText(Charsets.UTF_8)
-            listOf("net.minecraft.", "meteordevelopment.", "fi.dy.", "net.fabricmc.", "org.lwjgl.", "org.spongepowered.")
+            listOf("net.minecraft.", "com.buildertoolbox.client.", "fi.dy.", "net.fabricmc.", "org.lwjgl.", "org.spongepowered.")
                 .none { it in source }
         }
+    })
+    source(fileTree("src/main/java/com/buildertoolbox/client") {
+        include("gui/GuiViewport.java", "ClientRuntime.java", "events/EventHandler.java", "events/Event.java", "settings/Setting.java", "settings/SettingBuilder.java", "settings/BoolSetting.java", "settings/IntSetting.java")
     })
     classpath = files()
     destinationDirectory.set(regressionOutput)
@@ -102,3 +101,6 @@ val regressionTest by tasks.registering {
     dependsOn(regressionRuns)
 }
 tasks.named("check") { dependsOn(regressionTest) }
+
+// Preserve upstream notices in both published artifacts.
+tasks.named<Jar>("sourcesJar") { from("licenses") { into("licenses") } }

@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.utils.misc.input; import net.minecraft.client.option.KeyBinding; public final class Input {public static void setKeyState(KeyBinding key,boolean pressed){key.setPressed(pressed);} }

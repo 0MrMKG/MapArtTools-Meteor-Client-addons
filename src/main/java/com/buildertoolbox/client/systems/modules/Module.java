@@ -1,0 +1,10 @@
+package com.buildertoolbox.client.systems.modules;
+import net.minecraft.client.MinecraftClient; import net.minecraft.text.Text; import com.buildertoolbox.client.ClientRuntime; import com.buildertoolbox.client.settings.Settings; import com.buildertoolbox.client.gui.*; import com.buildertoolbox.client.gui.widgets.WWidget;
+public class Module {
+ protected final MinecraftClient mc=MinecraftClient.getInstance(); public final Settings settings=new Settings(); public final Category category; public final String name,description; public String title; private boolean active;
+ public Module(Category category,String name,String description){this.category=category;this.name=name;this.title=name;this.description=description;}
+ public boolean isActive(){return active;} public void toggle(){if(active){active=false;ClientRuntime.EVENT_BUS.unsubscribe(this);onDeactivate();}else {active=true;ClientRuntime.EVENT_BUS.subscribe(this);ClientRuntime.EVENT_BUS.post(new com.buildertoolbox.client.events.meteor.ActiveModulesChangedEvent());onActivate();} com.buildertoolbox.client.Config.save();}
+ public void disable(){if(active)toggle();} public void onActivate(){} public void onDeactivate(){} public WWidget getWidget(GuiTheme theme){return null;} public String getInfoString(){return "";}
+ public void info(Text text){if(mc.player!=null)mc.player.sendMessage(Text.literal("[Map Art Tools] ").append(text),false);} public void info(String message,Object... args){message(message,args);} public void warning(String message,Object...args){message(message,args);} public void error(String message,Object...args){message(message,args);}
+ private void message(String m,Object...args){String text=String.format(m,args); if(mc.player!=null)mc.player.sendMessage(Text.literal("[Map Art Tools] "+text),false); else com.buildertoolbox.BuilderToolboxAddon.LOG.info(text);}
+}

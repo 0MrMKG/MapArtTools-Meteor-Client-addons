@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.settings; public final class EnumSetting {public static class Builder<T extends Enum<T>> extends SettingBuilder<T,Builder<T>> {}}

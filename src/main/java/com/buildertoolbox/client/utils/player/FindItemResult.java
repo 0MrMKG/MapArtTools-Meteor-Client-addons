@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.utils.player; public record FindItemResult(int slot,int count){public boolean found(){return slot>=0&&count>0;} public boolean isHotbar(){return slot>=0&&slot<9;} }

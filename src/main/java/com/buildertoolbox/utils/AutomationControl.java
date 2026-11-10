@@ -1,6 +1,6 @@
 package com.buildertoolbox.utils;
 
-import meteordevelopment.meteorclient.systems.modules.Module;
+import com.buildertoolbox.client.systems.modules.Module;
 
 /** Shared lease for tasks that walk and own container sessions. */
 public final class AutomationControl {

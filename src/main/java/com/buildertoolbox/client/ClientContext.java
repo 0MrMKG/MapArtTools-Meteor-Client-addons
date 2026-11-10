@@ -1,0 +1,1 @@
+package com.buildertoolbox.client; import net.minecraft.client.MinecraftClient; public final class ClientContext {public static final MinecraftClient mc=MinecraftClient.getInstance();private ClientContext(){}}

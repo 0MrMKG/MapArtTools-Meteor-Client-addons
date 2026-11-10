@@ -10,8 +10,6 @@ fabric-api = "0.141.6+1.21.11"
 # Loom (https://github.com/FabricMC/fabric-loom)
 loom = "1.16.3"
 
-# Meteor (https://github.com/MeteorDevelopment/meteor-client/)
-meteor = "1.21.11-SNAPSHOT"
 litematica = "0.26.11"
 malilib = "0.27.16"
 conditional-mixin = "0.6.4"
@@ -21,7 +19,6 @@ minecraft = { module = "com.mojang:minecraft", version.ref = "minecraft" }
 yarn = { module = "net.fabricmc:yarn", version.ref = "yarn-mappings" }
 fabric-loader = { module = "net.fabricmc:fabric-loader", version.ref = "fabric-loader" }
 fabric-api = { module = "net.fabricmc.fabric-api:fabric-api", version.ref = "fabric-api" }
-meteor-client = { module = "meteordevelopment:meteor-client", version.ref = "meteor" }
 litematica = { module = "maven.modrinth:litematica", version.ref = "litematica" }
 malilib = { module = "maven.modrinth:malilib", version.ref = "malilib" }
 conditional-mixin = { module = "me.fallenbreath:conditional-mixin-fabric", version.ref = "conditional-mixin" }

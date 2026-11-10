@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.events.game; public final class GameLeftEvent {}

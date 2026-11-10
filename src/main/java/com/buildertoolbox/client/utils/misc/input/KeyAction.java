@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.utils.misc.input; public enum KeyAction {Press,Release,Repeat; public static KeyAction of(int action){return action==0?Release:action==1?Press:Repeat;}}

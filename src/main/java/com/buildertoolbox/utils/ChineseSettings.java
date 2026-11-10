@@ -5,9 +5,9 @@ import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Map;
-import meteordevelopment.meteorclient.settings.Setting;
-import meteordevelopment.meteorclient.settings.SettingGroup;
-import meteordevelopment.meteorclient.systems.modules.Module;
+import com.buildertoolbox.client.settings.Setting;
+import com.buildertoolbox.client.settings.SettingGroup;
+import com.buildertoolbox.client.systems.modules.Module;
 
 /** Chinese display labels with the original Meteor profile keys preserved. */
 public final class ChineseSettings {

@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.systems.modules; public record Category(String name) {}

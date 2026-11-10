@@ -1,0 +1,1 @@
+package com.buildertoolbox.client.settings; public final class ColorSetting {public static class Builder extends SettingBuilder<com.buildertoolbox.client.utils.render.color.SettingColor,Builder> {public Builder(){value=new com.buildertoolbox.client.utils.render.color.SettingColor(255,255,255);}}}
