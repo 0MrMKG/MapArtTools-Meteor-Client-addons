@@ -1,5 +1,5 @@
 [versions]
-mod-version = "7.1.0-test"
+mod-version = "0.8.0"
 
 # Fabric (https://fabricmc.net/develop)
 minecraft = "1.21.11"
