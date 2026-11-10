@@ -8,7 +8,8 @@ public final class GuiViewportTest {
    check(Math.abs(widgetMouse*GuiViewport.SCALE-123)<1e-8,"pointer and render transforms stay aligned across GUI scales");
    check(Math.abs(GuiViewport.size(width)*GuiViewport.SCALE-width)<GuiViewport.SCALE,"window layout follows pixel dimensions, not scaled screen width");
   }
-  check(GuiViewport.viewHeight(1080)==360&&GuiViewport.viewHeight(2160)==360,"settings remain compact on large displays");
+  check(GuiViewport.viewHeight(1080)==GuiViewport.viewHeight(2160)
+   && GuiViewport.viewHeight(2160)*GuiViewport.SCALE<=GuiViewport.MAX_VIEW_HEIGHT,"larger text must retain the physical settings viewport height limit");
   check(GuiViewport.viewHeight(100)>=30,"small windows keep a positive scroll viewport");
   System.out.println("GuiViewport: scale-independent size, compact settings and pointer round-trips passed.");
  }
