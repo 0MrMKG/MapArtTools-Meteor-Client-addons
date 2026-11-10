@@ -8,8 +8,7 @@
     "MouseMixin",
     "ClientScreenMixin",
     "MovementTickMixin",
-    "NetworkMixin",
-    "ToolboxMenuMixin"
+    "NetworkMixin"
   ],
   "injectors": {
     "defaultRequire": 1
