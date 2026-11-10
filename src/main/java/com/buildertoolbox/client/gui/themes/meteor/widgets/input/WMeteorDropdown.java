@@ -68,14 +68,7 @@ public class WMeteorDropdown<T> extends WDropdown<T> implements MeteorWidget {
         protected void onRender(GuiRenderer renderer, double mouseX, double mouseY, double delta) {
             MeteorGuiTheme theme = theme();
 
-            Color color = theme.backgroundColor.get(pressed, mouseOver, true);
-            int preA = color.a;
-            color.a += color.a / 2;
-            color.validate();
-
-            renderer.quad(this, color);
-
-            color.a = preA;
+            renderer.rounded(x,y,width,height,3,theme.backgroundColor.get(pressed,mouseOver));
 
             String text = value.toString();
             renderer.text(text, x + width / 2 - theme.textWidth(text) / 2, y + pad(), theme.textColor.get(), false);

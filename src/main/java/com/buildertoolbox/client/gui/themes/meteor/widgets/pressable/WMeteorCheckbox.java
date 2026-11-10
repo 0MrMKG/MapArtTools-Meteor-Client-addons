@@ -10,28 +10,23 @@ import com.buildertoolbox.client.gui.renderer.GuiRenderer;
 import com.buildertoolbox.client.gui.themes.meteor.MeteorGuiTheme;
 import com.buildertoolbox.client.gui.themes.meteor.MeteorWidget;
 import com.buildertoolbox.client.gui.widgets.pressable.WCheckbox;
-import net.minecraft.util.math.MathHelper;
 
 public class WMeteorCheckbox extends WCheckbox implements MeteorWidget {
-    private double animProgress;
-
-    public WMeteorCheckbox(boolean checked) {
-        super(checked);
-        animProgress = checked ? 1 : 0;
-    }
-
-    @Override
-    protected void onRender(GuiRenderer renderer, double mouseX, double mouseY, double delta) {
-        MeteorGuiTheme theme = theme();
-
-        animProgress += (checked ? 1 : -1) * delta * 14;
-        animProgress = MathHelper.clamp(animProgress, 0, 1);
-
-        renderBackground(renderer, this, pressed, mouseOver);
-
-        if (animProgress > 0) {
-            double cs = (width - theme.scale(2)) / 1.75 * animProgress;
-            renderer.quad(x + (width - cs) / 2, y + (height - cs) / 2, cs, cs, theme.checkboxColor.get());
+    private double progress;
+    public WMeteorCheckbox(boolean checked) { super(checked);progress=checked?1:0; }
+    @Override protected void onRender(GuiRenderer renderer,double mouseX,double mouseY,double delta) {
+        MeteorGuiTheme theme=theme();
+        progress=MeteorGuiTheme.approach(progress,checked?1:0,delta,16);
+        renderBackground(renderer,this,pressed,mouseOver);
+        if(progress<=0)return;
+        renderer.rounded(x+1,y+1,width-2,height-2,MeteorGuiTheme.CONTROL_RADIUS-1,
+            MeteorGuiTheme.blend(theme.backgroundColor.get(pressed,mouseOver),theme.accentColor.get(),progress));
+        // A geometric check avoids missing Unicode glyphs and needs no external icon font.
+        if(progress>0.45) {
+            var ink=theme.windowColor.get();
+            double cx=x+width/2,cy=y+height/2;
+            for(int i=0;i<3;i++)renderer.quad(cx-4+i,cy+i-1,1,2,ink);
+            for(int i=0;i<5;i++)renderer.quad(cx-2+i,cy+1-i,1,2,ink);
         }
     }
 }

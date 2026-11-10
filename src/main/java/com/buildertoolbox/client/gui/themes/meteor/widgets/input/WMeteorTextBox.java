@@ -106,7 +106,7 @@ public class WMeteorTextBox extends WTextBox implements MeteorWidget {
             cursorTimer += delta * 1.75;
         }
 
-        renderBackground(renderer, this, false, false);
+        renderBackground(renderer, this, focused, mouseOver);
 
         MeteorGuiTheme theme = theme();
         double pad = pad();

@@ -8,6 +8,7 @@ package com.buildertoolbox.client.gui.themes.meteor.widgets;
 
 import com.buildertoolbox.client.gui.renderer.GuiRenderer;
 import com.buildertoolbox.client.gui.themes.meteor.MeteorWidget;
+import com.buildertoolbox.client.gui.themes.meteor.MeteorGuiTheme;
 import com.buildertoolbox.client.gui.widgets.WWidget;
 import com.buildertoolbox.client.gui.widgets.containers.WSection;
 import com.buildertoolbox.client.gui.widgets.pressable.WTriangle;
@@ -22,6 +23,12 @@ public class WMeteorSection extends WSection {
         return new WMeteorHeader(title);
     }
 
+    @Override
+    protected void onRender(GuiRenderer renderer, double mouseX, double mouseY, double delta) {
+        MeteorGuiTheme colors = (MeteorGuiTheme) theme;
+        renderer.roundedOutline(x, y, width, height, 4, colors.sectionColor.get(), colors.backgroundColor.get());
+    }
+
     protected class WMeteorHeader extends WHeader {
         private WTriangle triangle;
 
@@ -31,7 +38,7 @@ public class WMeteorSection extends WSection {
 
         @Override
         public void init() {
-            add(theme.horizontalSeparator(title)).expandX();
+            add(theme.label(title, true)).expandCellX().centerY().pad(5);
 
             if (headerWidget != null) add(headerWidget);
 
@@ -39,7 +46,7 @@ public class WMeteorSection extends WSection {
             triangle.theme = theme;
             triangle.action = this::onClick;
 
-            add(triangle);
+            add(triangle).centerY().padRight(5);
         }
 
         @Override

@@ -13,6 +13,7 @@ import com.buildertoolbox.client.gui.themes.meteor.MeteorWidget;
 import com.buildertoolbox.client.gui.widgets.pressable.WButton;
 
 public class WMeteorButton extends WButton implements MeteorWidget {
+    private double hoverProgress;
     public WMeteorButton(String text, GuiTexture texture) {
         super(text, texture);
     }
@@ -22,7 +23,10 @@ public class WMeteorButton extends WButton implements MeteorWidget {
         MeteorGuiTheme theme = theme();
         double pad = pad();
 
-        renderBackground(renderer, this, pressed, mouseOver);
+        hoverProgress=MeteorGuiTheme.approach(hoverProgress,mouseOver?1:0,delta,14);
+        renderBackground(renderer,this,
+            MeteorGuiTheme.blend(theme.outlineColor.get(),theme.accentColor.get(),pressed?1:hoverProgress*0.7),
+            MeteorGuiTheme.blend(theme.backgroundColor.get(),theme.backgroundColor.get(pressed,true),pressed?1:hoverProgress));
 
         if (text != null) {
             renderer.text(text, x + width / 2 - textWidth / 2, y + pad, theme.textColor.get(), false);
