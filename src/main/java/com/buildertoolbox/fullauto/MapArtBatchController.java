@@ -854,7 +854,7 @@ public final class MapArtBatchController {
             job.inspection=inspection.checkpoint(inspectionWaypoint,resume.getX(),resume.getZ());
         }
         try { journal.write(job); }
-        catch(IOException exception){stopSaveFailure=exception;throw exception;}
+        catch(IOException exception){stopSaveFailure=exception;com.buildertoolbox.BuilderToolboxAddon.LOG.error("Could not persist full-auto batch checkpoint",exception);throw exception;}
         stopSaveFailure=null;
         lastSavedNanos=now;
     }
@@ -871,7 +871,7 @@ public final class MapArtBatchController {
         return "["+queueProgress()+"："+file+(inspection!=null?" 漏放="+inspection.missing()+"/"+host.batchAllowedMissingBlocks()
             +" 错占="+inspection.wrong()+"（不计门槛）":errors>=0?" 观察差异="+errors:"")+"] ";
     }
-    private static String message(Throwable exception) {while(exception.getCause()!=null)exception=exception.getCause();return exception.getMessage()==null?exception.toString():exception.getMessage();}
+    private static String message(Throwable exception) {while((exception instanceof java.util.concurrent.CompletionException || exception instanceof java.util.concurrent.ExecutionException) && exception.getCause()!=null)exception=exception.getCause();return exception.getMessage()==null?exception.toString():exception.getMessage();}
 
     public void receive(Packet<?> packet) {
         cursorRecovery.onPacket(packet);
