@@ -3,7 +3,6 @@ package com.buildertoolbox.fullauto;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -88,7 +87,7 @@ public final class BatchJournal {
     public BatchJournal(Path file) { this.file = file; }
     public boolean exists() { return Files.exists(file); }
 
-    public State read() throws IOException {
+    public synchronized State read() throws IOException {
         Properties p = new Properties();
         try (InputStream input = Files.newInputStream(file)) { p.load(input); }
         try {
@@ -132,7 +131,7 @@ public final class BatchJournal {
         } catch (RuntimeException exception) { throw new IOException("进度文件损坏，不能猜测执行阶段：" + exception.getMessage(), exception); }
     }
 
-    public void write(State s) throws IOException {
+    public synchronized void write(State s) throws IOException {
         Properties p = new Properties();
         p.setProperty("version", "1"); p.setProperty("world",s.world); p.setProperty("dimension",s.dimension);
         p.setProperty("configuration",s.configuration); p.setProperty("folder",s.folder);
@@ -158,18 +157,17 @@ public final class BatchJournal {
         try {
             try (OutputStream output = Files.newOutputStream(temporary)) { p.store(output, "Builder Toolbox Full Auto - intent/commit journal"); }
             try (var channel = java.nio.channels.FileChannel.open(temporary, java.nio.file.StandardOpenOption.WRITE)) { channel.force(true); }
-            try { Files.move(temporary,file,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); }
-            catch (AtomicMoveNotSupportedException exception) { throw new IOException("文件系统不支持原子保存，任务已暂停", exception); }
+            AtomicJournalCommit.replace(temporary, file);
         } finally { Files.deleteIfExists(temporary); }
     }
 
     /** Keep the old live record until the new checkpoint is atomically committed. */
-    public void replace(State next) throws IOException {
+    public synchronized void replace(State next) throws IOException {
         archive(true);
         write(next);
     }
 
-    public void archive() throws IOException { archive(false); }
+    public synchronized void archive() throws IOException { archive(false); }
 
     private void archive(boolean keepCurrent) throws IOException {
         if (!Files.exists(file)) return;
@@ -192,14 +190,13 @@ public final class BatchJournal {
             try {
                 Files.copy(file, copy, StandardCopyOption.REPLACE_EXISTING);
                 try (var channel = java.nio.channels.FileChannel.open(copy,java.nio.file.StandardOpenOption.WRITE)) { channel.force(true); }
-                Files.move(copy,previous,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
+                AtomicJournalCommit.replace(copy, previous);
             } finally { Files.deleteIfExists(copy); }
             return;
         }
         // Preserve the live checkpoint and latest archive if this rename cannot
         // be completed atomically. Earlier archives already have unique copies.
-        try { Files.move(file,previous,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); }
-        catch (AtomicMoveNotSupportedException exception) { throw new IOException("文件系统不支持原子归档，原进度保留，初始化未执行",exception); }
+        AtomicJournalCommit.replace(file, previous);
     }
     private static String required(Properties p,String key) { String value=p.getProperty(key); if(value==null)throw new IllegalArgumentException("缺少 "+key);return value; }
     private static int integer(Properties p,String key,int fallback) { return Integer.parseInt(p.getProperty(key,""+fallback)); }
