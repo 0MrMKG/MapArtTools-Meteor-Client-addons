@@ -13,6 +13,9 @@ import net.minecraft.util.math.BlockPos;
 public final class BatchPaintingLoader {
     private BatchPaintingLoader() { }
     public static BatchPainting load(Path folder,BatchFiles.Entry file,BlockPos origin) throws IOException {
+        return load(folder, file, origin, CanvasOrientation.DEFAULT);
+    }
+    public static BatchPainting load(Path folder,BatchFiles.Entry file,BlockPos origin,CanvasOrientation orientation) throws IOException {
         Path path=folder.resolve(file.name()).normalize();
         if(!path.startsWith(folder)||!path.toRealPath().startsWith(folder.toRealPath()))throw new IOException("蓝图路径越界");
         if(!BatchFiles.fingerprint(path).equals(file.sha256()))throw new IOException("蓝图已变化，请确认后重建批次："+file.name());
@@ -31,7 +34,7 @@ public final class BatchPaintingLoader {
         if((long)maxX-minX+1!=128||(long)maxZ-minZ+1!=128||minY!=maxY)
             throw new IOException("只支持单层128×128地图画，文件区域范围不符："+file.name());
         if(minY!=0)throw new IOException("地图画层相对蓝图原点的Y不是0；请修正文件原点，程序不会擅自改层高");
-        int worldX=Math.addExact(origin.getX(),minX),worldZ=Math.addExact(origin.getZ(),minZ);
+        int worldX=orientation.minX(origin.getX(),minX,maxX),worldZ=orientation.minZ(origin.getZ(),minZ,maxZ);
         if(!BatchFiles.aligned(worldX,worldZ))throw new IOException("画布未对齐原版128格地图网格：最小X/Z都应为128×整数-64；当前 "+worldX+","+worldZ);
         BlockState[] blocks=new BlockState[16384]; Arrays.fill(blocks,Blocks.AIR.getDefaultState());
         boolean[] assigned=new boolean[16384];int nonAir=0;
@@ -41,7 +44,7 @@ public final class BatchPaintingLoader {
             if(container==null)throw new IOException("缺少区域方块数据："+name);
             int x0=BatchFiles.regionMinimum(pos.getX(),size.getX())-minX,z0=BatchFiles.regionMinimum(pos.getZ(),size.getZ())-minZ;
             for(int z=0;z<Math.abs(size.getZ());z++)for(int x=0;x<Math.abs(size.getX());x++) {
-                BlockState state=container.get(x,0,z);int index=(z0+z)*128+x0+x;
+                BlockState state=container.get(x,0,z);int index=orientation.index(x0+x,z0+z);
                 if(!state.isAir()&&(!(state.getBlock().asItem() instanceof BlockItem)||!state.getFluidState().isEmpty()))throw new IOException("画面包含无法普通放置的方块："+state);
                 if(assigned[index]&&!blocks[index].equals(state))throw new IOException("蓝图子区域重叠且内容冲突");
                 blocks[index]=state;assigned[index]=true;

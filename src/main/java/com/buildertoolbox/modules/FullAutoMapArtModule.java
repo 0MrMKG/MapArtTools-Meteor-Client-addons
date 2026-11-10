@@ -17,6 +17,8 @@ import com.buildertoolbox.fullauto.MapArtSupplyPlanner;
 import com.buildertoolbox.fullauto.MapArtColorFilter;
 import com.buildertoolbox.fullauto.MapArtBatchController;
 import com.buildertoolbox.fullauto.BatchPainting;
+import com.buildertoolbox.fullauto.CanvasAxisDirection;
+import com.buildertoolbox.fullauto.CanvasOrientation;
 import com.buildertoolbox.fullauto.BatchFiles;
 import com.buildertoolbox.fullauto.BatchJournal;
 import com.buildertoolbox.fullauto.BatchPrintCheckpoint;
@@ -65,6 +67,7 @@ import com.buildertoolbox.client.renderer.ShapeMode;
 import com.buildertoolbox.client.settings.BoolSetting;
 import com.buildertoolbox.client.settings.DoubleSetting;
 import com.buildertoolbox.client.settings.IntSetting;
+import com.buildertoolbox.client.settings.EnumSetting;
 import com.buildertoolbox.client.settings.Setting;
 import com.buildertoolbox.client.settings.SettingGroup;
 import com.buildertoolbox.client.settings.StringListSetting;
@@ -142,6 +145,14 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
         .defaultValue(0).range(0, 16384).sliderRange(0, 100).build());
     private final Setting<String> canvasOrigin = batchPosition("Canvas Origin", "右键方块的 X、Y+1、Z 作为画布原点。蓝图须为相对高度 Y=0 的单层 128×128 地图画。");
     private final Setting<Boolean> selectCanvas = batchSelector("Set Canvas Origin", BatchLocation.CANVAS);
+    private final Setting<CanvasAxisDirection> canvasXDirection = sgLocations.add(new EnumSetting.Builder<CanvasAxisDirection>()
+        .name("Canvas X Direction")
+        .description("点击在 X+ 与 X- 之间切换。默认 X+ 保持原有扩展方式，负方向相对于画布原点翻转蓝图 X 坐标。修改已有批次的方向后需重新初始化。")
+        .defaultValue(CanvasAxisDirection.POSITIVE).build());
+    private final Setting<CanvasAxisDirection> canvasZDirection = sgLocations.add(new EnumSetting.Builder<CanvasAxisDirection>()
+        .name("Canvas Z Direction")
+        .description("点击在 Z+ 与 Z- 之间切换。默认 Z+ 保持原有扩展方式，负方向相对于画布原点翻转蓝图 Z 坐标。原点、子区域偏移和地图网格对齐规则仍然生效。")
+        .defaultValue(CanvasAxisDirection.POSITIVE).build());
     private final Setting<String> clearLever = batchPosition("Clear Lever", "用于两次触发出水和收水的拉杆坐标。");
     private final Setting<Boolean> selectLever = batchSelector("Set Clear Lever", BatchLocation.LEVER);
     private final Setting<String> mapSupply = batchPosition("Map Supply", "存放空地图和普通玻璃板的容器位置，无须物品标签。");
@@ -3769,7 +3780,8 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
             StorageBlockUtils.parsePosition(canvasOrigin.get()), StorageBlockUtils.parsePosition(clearLever.get()),
             StorageBlockUtils.parsePosition(mapSupply.get()), StorageBlockUtils.parsePosition(cartographyTable.get()),
             StorageBlockUtils.parsePosition(productStorage.get()),
-            colorFilterEnabled.get() ? "true:" + excludedColors.get().stream().sorted().toList() : "false");
+            colorFilterEnabled.get() ? "true:" + excludedColors.get().stream().sorted().toList() : "false",
+            new CanvasOrientation(canvasXDirection.get().sign(), canvasZDirection.get().sign()));
     }
 
     @Override public boolean batchExcluded(BlockState block) { return isExcludedColor(block); }

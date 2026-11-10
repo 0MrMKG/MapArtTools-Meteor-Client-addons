@@ -40,11 +40,15 @@ import static com.buildertoolbox.fullauto.BatchJournal.Phase;
 /** Full-auto workflow. Its only worker dependency is its private Host interface. */
 public final class MapArtBatchController {
     public record Configuration(String folder, BlockPos origin, BlockPos lever, BlockPos mapSupply,
-                                BlockPos table, BlockPos product, String filter) {
-        public String signature() { return BatchFiles.hash(folder+"|"+origin+"|"+lever+"|"+mapSupply+"|"+table+"|"+product+"|"+filter); }
-        public String locations() { return "canvas="+origin+";lever="+lever+";mapSupply="+mapSupply+";table="+table+";product="+product; }
+                                BlockPos table, BlockPos product, String filter, CanvasOrientation orientation) {
+        public Configuration(String folder, BlockPos origin, BlockPos lever, BlockPos mapSupply,
+                             BlockPos table, BlockPos product, String filter) {
+            this(folder, origin, lever, mapSupply, table, product, filter, CanvasOrientation.DEFAULT);
+        }
+        public String signature() { return BatchFiles.hash(folder+"|"+origin+"|"+lever+"|"+mapSupply+"|"+table+"|"+product+"|"+filter+orientation.signatureSuffix()); }
+        public String locations() { return "canvas="+origin+";lever="+lever+";mapSupply="+mapSupply+";table="+table+";product="+product+";axes="+orientation.description(); }
         public void validate() throws IOException {
-            if(folder.isBlank()||origin==null||lever==null||mapSupply==null||table==null||product==null)
+            if(folder.isBlank()||origin==null||lever==null||mapSupply==null||table==null||product==null||orientation==null)
                 throw new IOException("请填写蓝图目录，并登记画布原点、拉杆、地图原料箱、制图台和成品箱");
             if(mapSupply.equals(product))throw new IOException("地图原料箱与成品箱请使用不同位置");
         }
@@ -275,7 +279,7 @@ public final class MapArtBatchController {
         tick++;
         if(!running)return true;
         try {
-            if(!config.signature().equals(host.batchConfiguration().signature()))throw new IOException("位置、目录或颜色筛选已改变，已暂停；恢复原配置后可续作");
+            if(!config.signature().equals(host.batchConfiguration().signature()))throw new IOException("位置、扩展方向、目录或颜色筛选已改变，已暂停；恢复原配置后可续作");
             if(job!=null&&(!job.world.equals(world())||!job.dimension.equals(dimension())))throw new IOException("服务器/存档或维度发生变化");
             access.claimPendingHandler(tick);checkAccess();
             if(cursorRecovery.tick(mc.player.currentScreenHandler==mc.player.playerScreenHandler
@@ -396,7 +400,7 @@ public final class MapArtBatchController {
 
     private void loadPainting() throws IOException {
         var entry=job.queue.get(job.index);
-        painting=BatchPaintingLoader.load(folder,entry,config.origin());
+        painting=BatchPaintingLoader.load(folder,entry,config.origin(),config.orientation());
         if(painting.y()<=mc.world.getBottomY()||painting.y()>mc.world.getTopYInclusive())throw new IOException("画布高度超出当前世界可放置范围，或没有底板空间");
         int maxX=Math.addExact(painting.minX(),127),maxZ=Math.addExact(painting.minZ(),127);
         if(!mc.world.getWorldBorder().contains(new BlockPos(painting.minX(),painting.y(),painting.minZ()))

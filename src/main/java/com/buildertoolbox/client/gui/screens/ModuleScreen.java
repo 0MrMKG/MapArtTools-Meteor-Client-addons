@@ -14,6 +14,7 @@ public final class ModuleScreen extends WidgetScreen {
  var footer=window.add(theme.horizontalList()).expandX().widget();footer.add(theme.label("启用功能"));var active=footer.add(theme.checkbox(module.isActive())).widget();active.action=()->{if(active.checked!=module.isActive())module.toggle();active.checked=module.isActive();};
  }
  @SuppressWarnings({"rawtypes","unchecked"})private WWidget editor(Setting setting){Object value=setting.get();
+ if(value instanceof com.buildertoolbox.fullauto.CanvasAxisDirection direction){String axis=setting.name.equals("Canvas X Direction")?"X":"Z";var button=theme.button(direction.buttonLabel(axis));button.minWidth=42;button.action=()->{var next=((com.buildertoolbox.fullauto.CanvasAxisDirection)setting.get()).next();setting.set(next);button.set(next.buttonLabel(axis));com.buildertoolbox.client.Config.save();};return button;}
  if(value instanceof java.util.List){var table=theme.table();com.buildertoolbox.client.gui.StringListEditor.fillTable(theme,table,setting);return table;}
  if(value instanceof Boolean b){var box=theme.checkbox(b);box.action=()->{setting.set(box.checked);if(client.currentScreen==this)reload();};return box;}
  if(value instanceof Integer n){var edit=theme.intEdit(n,(int)Math.max(Integer.MIN_VALUE,setting.min),(int)Math.min(Integer.MAX_VALUE,setting.max),(int)setting.sliderMin,(int)setting.sliderMax,!setting.slider);edit.small=true;edit.action=()->setting.set(edit.get());return edit;}
