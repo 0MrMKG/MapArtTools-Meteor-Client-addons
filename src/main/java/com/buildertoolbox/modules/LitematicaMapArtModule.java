@@ -348,6 +348,11 @@ public final class LitematicaMapArtModule extends Module {
     private TaskState stateBeforeRegistration = TaskState.IDLE;
     private String activity = "空闲";
 
+    @Override
+    public Module fromTag(net.minecraft.nbt.NbtCompound tag) {
+        return super.fromTag(com.buildertoolbox.utils.LocationSettingsMigration.apply(tag, sgLocations));
+    }
+
     public LitematicaMapArtModule() {
         super(BuilderToolboxAddon.CATEGORY, "Map Art Maker", "按蛇形条带铺设当前 Litematica 投影层，并从已登记的材料箱自动补货。");
     }

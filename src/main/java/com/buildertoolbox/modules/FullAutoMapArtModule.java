@@ -419,6 +419,11 @@ public final class FullAutoMapArtModule extends Module implements MapArtBatchCon
     private long directoryValidationGeneration;
     private String directoryValidationStatus = "尚未验证目录";
 
+    @Override
+    public Module fromTag(net.minecraft.nbt.NbtCompound tag) {
+        return super.fromTag(com.buildertoolbox.utils.LocationSettingsMigration.apply(tag, sgLocations));
+    }
+
     public FullAutoMapArtModule() {
         super(BuilderToolboxAddon.CATEGORY, "map-artmaker-all-auto", "依次读取文件夹中的蓝图，自动清理画布、蛇形铺设、生成地图、锁图并存入成品箱。");
     }

@@ -136,6 +136,11 @@ public final class ChestOrganizerModule extends Module {
     private final Map<Integer, ServerInventory> serverInventories = new HashMap<>();
     private String activity = "空闲";
 
+    @Override
+    public Module fromTag(net.minecraft.nbt.NbtCompound tag) {
+        return super.fromTag(com.buildertoolbox.utils.LocationSettingsMigration.apply(tag, sgStorage));
+    }
+
     public ChestOrganizerModule() {
         super(BuilderToolboxAddon.CATEGORY, "Chest Organizer",
             "根据登记箱子的物品展示框标签，将错放物品取出并归类到对应箱子。");
